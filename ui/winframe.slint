@@ -1,0 +1,70 @@
+// The thin own title bar of Lasso's two normal windows (the user, 13 Nov 2026: "a mini version of aimdot" with a
+// thinner title bar - 36 px instead of Echo / Aimdot's 52): logo + name, drag area, minimize / maximize / close.
+// Rust side: windows_ui.rs (native move, so Windows snap still works; double-click maximizes).
+
+import { T, WinBtn, Edge } from "theme.slint";
+
+export component TitleBar inherits Rectangle {
+    in property <string> title;
+    in property <string> sub;
+    in property <bool> win-max;
+    callback win-act(string);
+    height: 36px;
+    background: T.rail;
+    clip: true;
+    // the Lasso glow: soft teal from the top left
+    Rectangle {
+        background: @linear-gradient(90deg, T.accent.with-alpha(0.16) 0%, T.accent.with-alpha(0.05) 30%, T.accent.with-alpha(0.0) 60%);
+    }
+    Rectangle { y: parent.height - 1px; height: 1px; background: T.line; }
+    TouchArea {
+        moved => {
+            if (self.pressed && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                root.win-act("drag");
+            }
+        }
+        double-clicked => { root.win-act("max"); }
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        spacing: 8px;
+        Image {
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            source: @image-url("../assets/icons/lasso.svg");
+        }
+        Text {
+            text: root.title;
+            font-size: 13.5px;
+            font-weight: 700;
+            color: T.text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.sub;
+            font-size: 12.5px;
+            color: T.muted;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        @children
+        WinBtn { kind: "min"; clicked => { root.win-act("min"); } }
+        WinBtn { kind: root.win-max ? "restore" : "max"; clicked => { root.win-act("max"); } }
+        WinBtn { kind: "close"; clicked => { root.win-act("close"); } }
+    }
+}
+
+// 5 px invisible edges for resizing the frameless window
+export component Edges inherits Rectangle {
+    callback win-act(string);
+    Edge { x: 0; y: 0; width: 6px; height: 6px; dir: "nw"; go(d) => { root.win-act("resize:" + d); } }
+    Edge { x: root.width - 6px; y: 0; width: 6px; height: 6px; dir: "ne"; go(d) => { root.win-act("resize:" + d); } }
+    Edge { x: 0; y: root.height - 6px; width: 6px; height: 6px; dir: "sw"; go(d) => { root.win-act("resize:" + d); } }
+    Edge { x: root.width - 6px; y: root.height - 6px; width: 6px; height: 6px; dir: "se"; go(d) => { root.win-act("resize:" + d); } }
+    Edge { x: 6px; y: 0; width: root.width - 12px; height: 4px; dir: "n"; go(d) => { root.win-act("resize:" + d); } }
+    Edge { x: 6px; y: root.height - 4px; width: root.width - 12px; height: 4px; dir: "s"; go(d) => { root.win-act("resize:" + d); } }
+    Edge { x: 0; y: 6px; width: 4px; height: root.height - 12px; dir: "w"; go(d) => { root.win-act("resize:" + d); } }
+    Edge { x: root.width - 4px; y: 6px; width: 4px; height: root.height - 12px; dir: "e"; go(d) => { root.win-act("resize:" + d); } }
+}

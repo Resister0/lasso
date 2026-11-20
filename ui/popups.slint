@@ -1,0 +1,273 @@
+// Small Lasso surfaces outside the frozen screen: the first-time "Closed. Restore" popup (the user, 13 Nov 2026:
+// "First time you do it, a popup, next time, a button in the tray icon"), the corner thumbnail after a capture,
+// and pinned pictures (float on top, drag to move, wheel = zoom, Ctrl+wheel = see-through, double-click / Esc closes).
+
+import { B, I, Kbd, BarBtn, Ico, Logo } from "bars.slint";
+
+export component RestorePopup inherits Window {
+    no-frame: true;
+    title: "Lasso";
+    background: transparent;
+    in property <string> when;
+    callback restore();
+    callback dismiss();
+    Rectangle {
+        x: 6px;
+        y: 6px;
+        width: root.width - 12px;
+        height: root.height - 12px;
+        border-radius: 12px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000088;
+        HorizontalLayout {
+            padding: 12px;
+            spacing: 10px;
+            Logo { y: (parent.height - self.height) / 2; width: 24px; height: 24px; }
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+                Text { text: "Closed. Your capture is kept."; color: B.text; font-size: 13.5px; font-weight: 600; }
+                Text { text: "Next time it's in the tray menu"; color: B.muted; font-size: 12px; }
+            }
+            BarBtn {
+                y: (parent.height - self.height) / 2;
+                icon: I.restore;
+                text: "Restore";
+                primary: true;
+                clicked => { root.restore(); }
+            }
+            BarBtn {
+                y: (parent.height - self.height) / 2;
+                icon: I.close;
+                muted: true;
+                clicked => { root.dismiss(); }
+            }
+        }
+    }
+}
+
+// The corner thumbnail after a capture (CleanShot's "quick access overlay", the user's list of 20 Nov 2026): drag the
+// picture out into Discord / a browser / a folder, click = edit, buttons copy / save / pin / edit / delete / close.
+// Stays while the mouse is over it.
+export component Thumb inherits Window {
+    no-frame: true;
+    title: "Lasso";
+    background: transparent;
+    in property <image> pic;
+    in property <string> info;
+    in property <string> note;
+    // false = no drag out here (the hint then says click = edit only)
+    in property <bool> can-drag: true;
+    callback open();
+    callback act(string);
+    callback hover(bool);
+    callback drag-out();
+    property <bool> dragging;
+    outer := TouchArea {
+        changed has-hover => { root.hover(self.has-hover); }
+        Rectangle {
+            x: 6px;
+            y: 6px;
+            width: root.width - 12px;
+            height: root.height - 12px;
+            border-radius: 12px;
+            background: B.bar;
+            border-width: 1px;
+            border-color: B.line;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #00000088;
+            clip: true;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+                Rectangle {
+                    border-radius: 8px;
+                    clip: true;
+                    background: #000;
+                    vertical-stretch: 1;
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.pic;
+                        image-fit: contain;
+                    }
+                    ta := TouchArea {
+                        mouse-cursor: root.dragging ? MouseCursor.grabbing : root.can-drag ? MouseCursor.grab : MouseCursor.pointer;
+                        pointer-event(ev) => {
+                            if ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left {
+                                root.dragging = false;
+                            }
+                        }
+                        moved => {
+                            // a drag of more than 6 px = take the picture out (once per press)
+                            if root.can-drag && self.pressed && !root.dragging
+                                && (abs(self.mouse-x - self.pressed-x) > 6px || abs(self.mouse-y - self.pressed-y) > 6px) {
+                                root.dragging = true;
+                                root.drag-out();
+                            }
+                        }
+                        clicked => {
+                            if !root.dragging { root.open(); }
+                        }
+                    }
+                    if ta.has-hover && !root.dragging: Rectangle {
+                        background: #000000a0;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text { text: root.can-drag ? "Drag it anywhere" : "Click to edit"; color: white; font-size: 14px; font-weight: 600; horizontal-alignment: center; }
+                            if root.can-drag: Text { text: "Discord, a browser, a folder · click = edit"; color: #ffffffc0; font-size: 11.5px; horizontal-alignment: center; }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    height: 30px;
+                    spacing: 2px;
+                    Text { text: root.note != "" ? root.note : root.info; color: B.muted; font-size: 11.5px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    BarBtn { icon: I.copy; clicked => { root.act("copy"); } }
+                    BarBtn { icon: I.save; clicked => { root.act("save"); } }
+                    BarBtn { icon: I.pin; clicked => { root.act("pin"); } }
+                    BarBtn { icon: I.edit; clicked => { root.open(); } }
+                    BarBtn { icon: I.trash; clicked => { root.act("delete"); } }
+                    BarBtn { icon: I.close; muted: true; clicked => { root.act("close"); } }
+                }
+            }
+        }
+    }
+}
+
+export component Pin inherits Window {
+    no-frame: true;
+    title: "Lasso pin";
+    background: transparent;
+    in property <image> pic;
+    in property <float> see: 1.0;
+    in property <string> zoom-text;
+    callback drag-start(length, length);
+    callback drag(length, length);
+    callback wheel(float, bool);
+    callback close-pin();
+    Rectangle {
+        x: 4px;
+        y: 4px;
+        width: root.width - 8px;
+        height: root.height - 8px;
+        opacity: root.see;
+        border-width: 1px;
+        border-color: B.accent;
+        drop-shadow-blur: 4px;
+        drop-shadow-color: #00000088;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.pic;
+            image-fit: fill;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: move;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.drag-start(self.mouse-x, self.mouse-y);
+            } else if e.kind == PointerEventKind.move && self.pressed {
+                root.drag(self.mouse-x, self.mouse-y);
+            }
+        }
+        double-clicked => { root.close-pin(); }
+        scroll-event(e) => {
+            root.wheel(e.delta-y > 0 ? 1 : -1, e.modifiers.control);
+            accept
+        }
+    }
+    if ta.has-hover && root.zoom-text != "": Rectangle {
+        x: root.width - self.width - 10px;
+        y: 10px;
+        width: zt.preferred-width + 12px;
+        height: 20px;
+        border-radius: 5px;
+        background: #000000aa;
+        zt := Text { text: root.zoom-text; color: white; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}
+
+// First start ever: where Lasso lives + the two ways to start it
+export component Hello inherits Window {
+    no-frame: true;
+    title: "Lasso";
+    background: transparent;
+    callback act(string);
+    Rectangle {
+        x: 6px;
+        y: 6px;
+        width: root.width - 12px;
+        height: root.height - 12px;
+        border-radius: 12px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000088;
+        VerticalLayout {
+            padding: 14px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                Logo { width: 26px; height: 26px; }
+                Text { text: "Lasso is running"; color: B.text; font-size: 15px; font-weight: 700; vertical-alignment: center; horizontal-stretch: 1; }
+                BarBtn { icon: I.close; muted: true; clicked => { root.act("ok"); } }
+            }
+            Text {
+                text: "It waits in the tray. Click its icon (or run lasso --region) to freeze the screen, drag a box, draw, press Enter. Esc closes at once - nothing is lost.";
+                color: B.muted;
+                font-size: 12.5px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: end;
+                BarBtn { text: "Set up a key"; clicked => { root.act("keys"); } }
+                BarBtn { icon: I.crop; text: "Capture now"; primary: true; clicked => { root.act("capture"); } }
+            }
+        }
+    }
+}
+
+// Scrolling capture: what's happening + Done / Cancel (the page under the box is scrolled by the user)
+export component ScrollPopup inherits Window {
+    no-frame: true;
+    title: "Lasso";
+    background: transparent;
+    in property <string> status;
+    callback act(string);
+    Rectangle {
+        x: 6px;
+        y: 6px;
+        width: root.width - 12px;
+        height: root.height - 12px;
+        border-radius: 12px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.accent;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000088;
+        VerticalLayout {
+            padding: 14px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                Logo { width: 22px; height: 22px; }
+                Text { text: "Scrolling capture"; color: B.text; font-size: 14.5px; font-weight: 700; vertical-alignment: center; horizontal-stretch: 1; }
+            }
+            Text { text: root.status; color: B.muted; font-size: 12.5px; wrap: word-wrap; }
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: end;
+                BarBtn { text: "Cancel"; clicked => { root.act("cancel"); } }
+                BarBtn { icon: I.check; text: "Done"; primary: true; clicked => { root.act("done"); } }
+            }
+        }
+    }
+}

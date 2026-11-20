@@ -1,0 +1,15 @@
+# NOT built. Tauri's NSIS bundler (used only to pack Lasso-Setup.exe, same method as Aimdot's and Echo's installers -
+# ci/public-build.yml, step "Installer") needs a Cargo manifest next to tauri.conf.json. Its own [workspace], so the
+# main build never sees it.
+[package]
+name = "lasso-installer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "lasso"
+path = "dummy.rs"
+
+[workspace]

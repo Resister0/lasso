@@ -1,0 +1,30 @@
+[Desktop Entry]
+Type=Application
+Name=Lasso
+GenericName=Screenshot tool
+Comment=Screenshots with every editing tool right on the frozen screen
+Exec=lasso %U
+Icon=link.sonela.Lasso
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=screenshot;snip;capture;annotate;screen;
+StartupNotify=false
+StartupWMClass=link.sonela.Lasso
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2,org.kde.KWin.CaptureScreen
+Actions=Region;Full;Window;Library;
+
+[Desktop Action Region]
+Name=Capture an area
+Exec=lasso --region
+
+[Desktop Action Full]
+Name=Full screenshot
+Exec=lasso --full
+
+[Desktop Action Window]
+Name=Capture a window
+Exec=lasso --window
+
+[Desktop Action Library]
+Name=Library
+Exec=lasso --library

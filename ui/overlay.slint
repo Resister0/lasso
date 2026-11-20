@@ -1,0 +1,761 @@
+// The frozen screen with every tool around the box (the user, 13 Nov 2026: "Picking the area with ALL editor things
+// in it"). Design = Echo/Claude outputs/lasso-mockups/overlay.html: tools right of the box, the tool's options
+// above, actions below, size chip bottom-left, slim mode bar on top. Bars flip to the other side near a screen
+// edge and fold to icons when the box is small. Everything here is in logical px; Rust (src/app.rs) sets the
+// properties after each input and gets the canvas pointer events + button commands back.
+
+import { B, I, Kbd, BarBtn, Ico, Logo, Sw } from "bars.slint";
+
+export struct ToolItem {
+    id: string,
+    icon: string,
+    key: string,
+    name: string,
+    sep: bool,
+}
+
+export struct KeyRow {
+    key: string,
+    what: string,
+    // a section title instead of a key
+    head: bool,
+    col: int,
+}
+
+export struct Pt {
+    x: length,
+    y: length,
+}
+
+export component Overlay inherits Window {
+    no-frame: true;
+    title: "Lasso";
+    background: #18181c;
+    forward-focus: ks;
+
+    // the frozen picture and where it sits (zoom / library pictures)
+    in property <image> bg;
+    // the same picture darkened (the dim outside the box) + the box in picture px: moving the box repaints only the
+    // box, not the dark strips around it (fast at 240 Hz)
+    in property <image> bg-dim;
+    // lighter copy shown while picking (instead of a full-screen dim layer over the picture)
+    in property <image> bg-light;
+    in property <bool> light-ready;
+    in property <bool> dim-ready;
+    in property <int> pbx;
+    in property <int> pby;
+    in property <int> pbw: 1;
+    in property <int> pbh: 1;
+    in property <length> vx;
+    in property <length> vy;
+    in property <length> vw: root.width;
+    in property <length> vh: root.height;
+    in property <bool> pixelated;
+    // the drawn box content (picture + shapes), only while shapes exist
+    in property <image> layer;
+    in property <bool> show-layer;
+    // the shape being dragged, on its own (picture px area -> screen)
+    in property <image> live;
+    in property <bool> show-live;
+    in property <length> live-x;
+    in property <length> live-y;
+    in property <length> live-w;
+    in property <length> live-h;
+    in property <length> lx;
+    in property <length> ly;
+    in property <length> lw;
+    in property <length> lh;
+
+    in property <bool> has-box;
+    in property <length> bx;
+    in property <length> by;
+    in property <length> bw;
+    in property <length> bh;
+    // Pick phase (no tools yet) / the box is being dragged out
+    in property <bool> picking: true;
+    in property <bool> dragging;
+    in property <length> mx;
+    in property <length> my;
+    in property <bool> mouse-in;
+    in property <bool> show-mag;
+    in property <image> mag;
+    in property <string> mag-label;
+    in property <string> size-label;
+
+    in property <[ToolItem]> tools;
+    in property <int> tool;
+    in property <string> tool-name;
+    in property <string> tool-key;
+    in property <[color]> palette;
+    in property <int> color-idx: 0;
+    in property <bool> has-color: true;
+    in property <bool> has-size: true;
+    in property <bool> has-fill;
+    in property <bool> has-shadow;
+    in property <float> size-v: 4;
+    in property <float> size-lo: 1;
+    in property <float> size-hi: 40;
+    in property <string> size-text: "4 px";
+    in property <bool> fill;
+    in property <bool> shadow;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    in property <string> blur-look;
+
+    in property <int> mode;
+    in property <string> timer-label: "Timer";
+    in property <bool> pointer-on;
+    in property <bool> link-on: true;
+
+    in property <bool> win-hover;
+    in property <length> wx;
+    in property <length> wy;
+    in property <length> ww;
+    in property <length> wh;
+
+    in property <bool> sel-show;
+    in property <length> sx;
+    in property <length> sy;
+    in property <length> sw;
+    in property <length> sh;
+    in property <[Pt]> sel-handles;
+
+    in property <bool> caret-show;
+    in property <length> cx;
+    in property <length> cy;
+    in property <length> ch;
+
+    in property <bool> keys-sheet;
+    // Ctrl+H: only the picture, the box and the shapes
+    in property <bool> bars-hidden;
+    in property <[KeyRow]> key-rows;
+    in property <string> toast;
+    in property <bool> busy;
+    in property <string> busy-text;
+
+    // bars over the picture: Rust doesn't treat clicks there as canvas clicks (cursor = arrow)
+    out property <bool> over-ui: modes.hov || (root.has-box && !root.picking && (opts-ta.has-hover || tools-ta.has-hover || acts-ta.has-hover));
+
+    callback canvas-down(length, length, int);
+    callback canvas-move(length, length);
+    callback canvas-up(length, length);
+    callback canvas-double(length, length);
+    callback canvas-wheel(length, length, float);
+    callback cmd(string);
+    callback size-set(float);
+    // winit path only (Windows / GNOME); on KDE the keys come straight from Wayland
+    callback key(string, bool, bool, bool, bool) -> bool;
+    callback key-up(string, bool, bool, bool);
+
+    ks := FocusScope {
+        key-pressed(e) => {
+            if root.key(e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, e.repeat) {
+                return accept;
+            }
+            reject
+        }
+        key-released(e) => {
+            root.key-up(e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt);
+            accept
+        }
+    }
+
+    // --- the picture -------------------------------------------------------------------------------------
+    Image {
+        x: root.vx;
+        y: root.vy;
+        width: root.vw;
+        height: root.vh;
+        source: root.has-box ? (root.dim-ready ? root.bg-dim : root.bg) : (root.light-ready && !root.win-hover ? root.bg-light : root.bg);
+        image-fit: ImageFit.fill;
+        image-rendering: root.pixelated ? ImageRendering.pixelated : ImageRendering.smooth;
+    }
+    if root.has-box && root.dim-ready: Image {
+        x: root.bx;
+        y: root.by;
+        width: root.bw;
+        height: root.bh;
+        source: root.bg;
+        source-clip-x: root.pbx;
+        source-clip-y: root.pby;
+        source-clip-width: root.pbw;
+        source-clip-height: root.pbh;
+        image-fit: ImageFit.fill;
+        image-rendering: root.pixelated ? ImageRendering.pixelated : ImageRendering.smooth;
+    }
+    if root.show-layer: Image {
+        x: root.lx;
+        y: root.ly;
+        width: root.lw;
+        height: root.lh;
+        source: root.layer;
+        image-fit: ImageFit.fill;
+        image-rendering: root.pixelated ? ImageRendering.pixelated : ImageRendering.smooth;
+    }
+
+    if root.show-live: Image {
+        x: root.live-x;
+        y: root.live-y;
+        width: root.live-w;
+        height: root.live-h;
+        source: root.live;
+        image-fit: ImageFit.fill;
+        image-rendering: root.pixelated ? ImageRendering.pixelated : ImageRendering.smooth;
+    }
+
+    // --- dim outside the box (or a light dim of everything while nothing is picked) ----------------------
+    if !root.has-box && !root.win-hover && !root.light-ready: Rectangle {
+        background: #00000059;
+    }
+    if !root.has-box && root.win-hover: Rectangle {
+        // window mode: dim around the window under the mouse
+        Rectangle { x: 0; y: 0; width: root.width; height: root.wy; background: #000000a8; }
+        Rectangle { x: 0; y: root.wy + root.wh; width: root.width; height: root.height - root.wy - root.wh; background: #000000a8; }
+        Rectangle { x: 0; y: root.wy; width: root.wx; height: root.wh; background: #000000a8; }
+        Rectangle { x: root.wx + root.ww; y: root.wy; width: root.width - root.wx - root.ww; height: root.wh; background: #000000a8; }
+        Rectangle { x: root.wx; y: root.wy; width: root.ww; height: root.wh; border-width: 3px; border-color: B.accent; }
+    }
+    if root.has-box && !root.dim-ready: Rectangle {
+        Rectangle { x: 0; y: 0; width: root.width; height: max(0px, root.by); background: #000000a8; }
+        Rectangle { x: 0; y: root.by + root.bh; width: root.width; height: max(0px, root.height - root.by - root.bh); background: #000000a8; }
+        Rectangle { x: 0; y: root.by; width: max(0px, root.bx); height: root.bh; background: #000000a8; }
+        Rectangle { x: root.bx + root.bw; y: root.by; width: max(0px, root.width - root.bx - root.bw); height: root.bh; background: #000000a8; }
+    }
+
+    // --- the canvas: every pointer event that isn't on a bar -----------------------------------------------
+    canvas := TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.canvas-down(self.mouse-x, self.mouse-y, e.button == PointerEventButton.left ? 1 : e.button == PointerEventButton.right ? 2 : 3);
+            } else if e.kind == PointerEventKind.up {
+                root.canvas-up(self.mouse-x, self.mouse-y);
+            } else if e.kind == PointerEventKind.move {
+                root.canvas-move(self.mouse-x, self.mouse-y);
+            }
+        }
+        double-clicked => {
+            root.canvas-double(self.mouse-x, self.mouse-y);
+        }
+        scroll-event(e) => {
+            root.canvas-wheel(self.mouse-x, self.mouse-y, e.delta-y / 1px);
+            accept
+        }
+    }
+
+    // --- the box, selection, caret -----------------------------------------------------------------------
+    if root.has-box: Rectangle {
+        x: root.bx - 1px;
+        y: root.by - 1px;
+        width: root.bw + 2px;
+        height: root.bh + 2px;
+        border-width: 2px;
+        border-color: B.accent;
+        Rectangle {
+            x: -1px;
+            y: -1px;
+            width: parent.width + 2px;
+            height: parent.height + 2px;
+            border-width: 1px;
+            border-color: #00000099;
+        }
+        for h in [{ x: 0, y: 0 }, { x: 0.5, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 0.5 }, { x: 1, y: 1 }, { x: 0.5, y: 1 }, { x: 0, y: 1 }, { x: 0, y: 0.5 }]: Rectangle {
+            x: parent.width * h.x - 5px;
+            y: parent.height * h.y - 5px;
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+            background: white;
+            border-width: 2px;
+            border-color: B.accent;
+            visible: (!root.dragging && root.bw > 30px && root.bh > 30px) || (h.x != 0.5 && h.y != 0.5);
+        }
+    }
+    if root.sel-show: Rectangle {
+        x: root.sx;
+        y: root.sy;
+        width: root.sw;
+        height: root.sh;
+        border-width: 1px;
+        border-color: B.accent2;
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            border-width: 1px;
+            border-color: #ffffff55;
+        }
+    }
+    for p in root.sel-handles: Rectangle {
+        x: p.x - 4px;
+        y: p.y - 4px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: white;
+        border-width: 2px;
+        border-color: B.accent2;
+    }
+    if root.caret-show: Rectangle {
+        x: root.cx;
+        y: root.cy;
+        width: 2px;
+        height: root.ch;
+        background: B.accent2;
+        property <bool> blink: true;
+        opacity: self.blink ? 1 : 0;
+        Timer {
+            interval: 530ms;
+            triggered => { parent.blink = !parent.blink; }
+        }
+    }
+
+    // --- picking: magnifier + size + hints ----------------------------------------------------------------
+    if root.picking && root.mouse-in: Rectangle {
+        // small cross at the mouse (the cursor is a crosshair too; this one also shows on screenshots)
+        x: root.mx - 12px;
+        y: root.my - 12px;
+        width: 24px;
+        height: 24px;
+        Rectangle { x: 11px; y: 0; width: 2px; height: 24px; background: white; border-width: 0; drop-shadow-blur: 1px; drop-shadow-color: black; }
+        Rectangle { x: 0; y: 11px; width: 24px; height: 2px; background: white; drop-shadow-blur: 1px; drop-shadow-color: black; }
+    }
+    if root.picking && root.mouse-in && root.show-mag: Rectangle {
+        property <bool> right: root.mx + 18px + 132px < root.width - 8px;
+        property <bool> down: root.my + 18px + 132px + 20px < root.height - 8px;
+        x: self.right ? root.mx + 18px : root.mx - 18px - 132px;
+        y: self.down ? root.my + 18px : root.my - 18px - 152px;
+        width: 132px;
+        height: 152px;
+        Rectangle {
+            width: 132px;
+            height: 132px;
+            y: 0;
+            border-radius: 12px;
+            clip: true;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #000000aa;
+            background: black;
+            Image {
+                width: 132px;
+                height: 132px;
+                source: root.mag;
+                image-rendering: ImageRendering.pixelated;
+            }
+            Rectangle {
+                border-radius: 12px;
+                border-width: 2px;
+                border-color: white;
+            }
+        }
+        Rectangle {
+            y: 132px;
+            height: 20px;
+            width: 132px;
+            background: #000000cc;
+            border-radius: 6px;
+            Text {
+                text: root.mag-label;
+                color: white;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    if root.picking && root.has-box: Rectangle {
+        x: min(max(4px, root.bx + root.bw - self.width), root.width - self.width - 4px);
+        y: root.by + root.bh + 10px + self.height < root.height ? root.by + root.bh + 10px : root.by + root.bh - self.height - 8px;
+        width: chip-t.preferred-width + 18px;
+        height: 24px;
+        border-radius: 6px;
+        background: B.accent;
+        chip-t := Text {
+            text: root.size-label;
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    if root.picking: Rectangle {
+        // hint bar, bottom centre
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 64px;
+        width: hint.preferred-width + 28px;
+        height: 36px;
+        border-radius: 10px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #00000099;
+        hint := HorizontalLayout {
+            x: 14px;
+            spacing: 16px;
+            alignment: center;
+            Text { text: root.mode == 2 ? "Click to take the screen" : root.mode == 1 ? "Click a window" : "Drag to pick"; color: B.muted; font-size: 13px; vertical-alignment: center; }
+            if root.mode == 0: HorizontalLayout { spacing: 6px; Kbd { text: "Tab"; } Text { text: "click a window"; color: B.muted; font-size: 13px; vertical-alignment: center; } }
+            HorizontalLayout { spacing: 6px; Text { text: "hold"; color: B.muted; font-size: 13px; vertical-alignment: center; } Kbd { text: "Space"; } Text { text: "move box"; color: B.muted; font-size: 13px; vertical-alignment: center; } }
+            HorizontalLayout { spacing: 6px; Kbd { text: "←↑→↓"; } Text { text: "nudge"; color: B.muted; font-size: 13px; vertical-alignment: center; } }
+            HorizontalLayout { spacing: 6px; Kbd { text: "Alt"; } Text { text: "+arrows resize"; color: B.muted; font-size: 13px; vertical-alignment: center; } }
+            HorizontalLayout { spacing: 6px; Kbd { text: "Esc"; } Text { text: "cancel"; color: B.muted; font-size: 13px; vertical-alignment: center; } }
+        }
+    }
+
+    // --- mode bar (top) ------------------------------------------------------------------------------------
+    modes := Rectangle {
+        property <bool> hov: mb-ta.has-hover;
+        visible: !root.bars-hidden;
+        x: (root.width - self.width) / 2;
+        y: 22px;
+        width: mhl.preferred-width;
+        height: 42px;
+        border-radius: 10px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #00000099;
+        mb-ta := TouchArea { }
+        mhl := HorizontalLayout {
+            padding: 5px;
+            spacing: 2px;
+            HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 8px;
+                spacing: 7px;
+                Logo { y: (parent.height - self.height) / 2; width: 20px; height: 20px; }
+                Text { text: "Lasso"; color: B.text; font-size: 13.5px; font-weight: 600; vertical-alignment: center; }
+            }
+            Rectangle {
+                width: seg.preferred-width;
+                border-radius: 7px;
+                background: B.panel2;
+                seg := HorizontalLayout {
+                    padding: 2px;
+                    spacing: 2px;
+                    for m[i] in ["Area", "Window", "Screen"]: Rectangle {
+                        width: mt.preferred-width + 20px;
+                        border-radius: 5px;
+                        background: i == root.mode ? B.accent : mta.has-hover ? B.hover : transparent;
+                        mt := Text {
+                            text: m;
+                            font-size: 12.5px;
+                            color: i == root.mode ? white : B.muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        mta := TouchArea {
+                            clicked => { root.cmd("mode:" + i); }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: 38px;
+                Kbd { x: 6px; y: (parent.height - self.height) / 2; text: "Tab"; }
+            }
+            Rectangle { width: 9px; Rectangle { x: 4px; y: 6px; width: 1px; height: parent.height - 12px; background: B.line; } }
+            BarBtn { icon: I.timer; text: root.timer-label; on: root.timer-label != "Timer"; clicked => { root.cmd("timer"); } }
+            BarBtn { icon: I.pointer; text: "Pointer"; on: root.pointer-on; clicked => { root.cmd("pointer"); } }
+            BarBtn { icon: I.recent; text: "Recent"; clicked => { root.cmd("library"); } }
+            BarBtn { icon: I.gear; clicked => { root.cmd("settings"); } }
+            BarBtn { kbd: "?"; text: "Keys"; on: root.keys-sheet; clicked => { root.cmd("keys"); } }
+            BarBtn { kbd: "Esc"; muted: true; clicked => { root.cmd("close"); } }
+        }
+    }
+
+    // --- options bar (above the box) ----------------------------------------------------------------------
+    property <length> gap: 10px;
+    property <bool> show-bars: root.has-box && !root.picking && !root.bars-hidden;
+    property <length> opt-h: 42px;
+    property <length> act-h: 42px;
+    // below the actions there must be room, else the bars go inside the box
+    property <bool> act-below: root.by + root.bh + 12px + root.act-h <= root.height - 8px;
+    property <length> act-y: root.act-below ? root.by + root.bh + 12px : max(8px, root.by + root.bh - root.act-h - 8px);
+    property <bool> opt-above: root.by - root.opt-h - root.gap >= 72px;
+    property <length> opt-y: root.opt-above ? root.by - root.opt-h - root.gap
+        : (root.act-below && root.by + root.bh + 12px + root.act-h + 8px + root.opt-h <= root.height - 8px) ? root.by + root.bh + 12px + root.act-h + 8px
+        : max(72px, root.by + 8px);
+    property <bool> small: root.bw < 420px;
+
+    Rectangle {
+        visible: root.show-bars;
+        x: min(max(8px, root.bx), root.width - self.width - 8px);
+        y: root.opt-y;
+        width: ohl.preferred-width;
+        height: root.opt-h;
+        border-radius: 10px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #00000099;
+        opts-ta := TouchArea { }
+        ohl := HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 6px;
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: root.tool-name; color: B.text; font-size: 12.5px; font-weight: 600; vertical-alignment: center; }
+                if root.tool-key != "": Kbd { y: (parent.height - self.height) / 2; text: root.tool-key; }
+                if root.blur-look != "": Text { text: root.blur-look; color: B.muted; font-size: 12px; vertical-alignment: center; }
+            }
+            if root.has-color: HorizontalLayout {
+                spacing: 7px;
+                for c[i] in root.palette: Rectangle {
+                    width: 22px;
+                    Rectangle {
+                        x: 2px;
+                        y: (parent.height - 18px) / 2;
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: c;
+                        border-width: 1px;
+                        border-color: #00000033;
+                    }
+                    if i == root.color-idx: Rectangle {
+                        x: -1px;
+                        y: (parent.height - 24px) / 2;
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 12px;
+                        border-width: 2px;
+                        border-color: B.text;
+                    }
+                    TouchArea {
+                        clicked => { root.cmd("color" + (i + 1)); }
+                    }
+                }
+                Kbd { y: (parent.height - self.height) / 2; text: "1–8"; }
+            }
+            if root.has-color && root.has-size: Rectangle { width: 1px; Rectangle { y: 11px; height: parent.height - 22px; background: B.line; } }
+            if root.has-size: HorizontalLayout {
+                spacing: 6px;
+                Text { text: "Size"; color: B.muted; font-size: 12.5px; vertical-alignment: center; }
+                Rectangle {
+                    width: 86px;
+                    property <float> frac: clamp((root.size-v - root.size-lo) / max(1, root.size-hi - root.size-lo), 0, 1);
+                    Rectangle { x: 6px; y: (parent.height - 4px) / 2; width: parent.width - 12px; height: 4px; border-radius: 2px; background: B.line; }
+                    Rectangle { x: 6px; y: (parent.height - 4px) / 2; width: (parent.width - 12px) * parent.frac; height: 4px; border-radius: 2px; background: B.accent; }
+                    Rectangle {
+                        x: (parent.width - 12px) * parent.frac;
+                        y: (parent.height - 12px) / 2;
+                        width: 12px;
+                        height: 12px;
+                        border-radius: 6px;
+                        background: white;
+                        drop-shadow-blur: 3px;
+                        drop-shadow-color: #00000066;
+                    }
+                    sta := TouchArea {
+                        function at(px: length) {
+                            root.size-set(root.size-lo + clamp((px - 6px) / (self.width - 12px), 0, 1) * (root.size-hi - root.size-lo));
+                        }
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down || (e.kind == PointerEventKind.move && self.pressed) {
+                                self.at(self.mouse-x);
+                            }
+                        }
+                        scroll-event(e) => {
+                            root.size-set(root.size-v + (e.delta-y > 0 ? 1 : -1));
+                            accept
+                        }
+                    }
+                }
+                Text { text: root.size-text; color: B.muted; font-size: 12.5px; vertical-alignment: center; min-width: 40px; }
+                Kbd { y: (parent.height - self.height) / 2; text: "[ ]"; }
+            }
+            if root.has-fill: Sw { text: "Fill"; on: root.fill; clicked => { root.cmd("fill"); } }
+            if root.has-shadow: Sw { text: root.tool == 8 ? "Outline" : "Shadow"; on: root.shadow; clicked => { root.cmd("shadow"); } }
+            Rectangle { width: 1px; Rectangle { y: 11px; height: parent.height - 22px; background: B.line; } }
+            HorizontalLayout {
+                spacing: 2px;
+                BarBtn { icon: I.undo; kbd-plain: "Ctrl Z"; dim: !root.can-undo; clicked => { root.cmd("undo"); } }
+                BarBtn { icon: I.redo; kbd-plain: "Ctrl ⇧ Z"; dim: !root.can-redo; clicked => { root.cmd("redo"); } }
+            }
+        }
+    }
+
+    // --- tool strip (right of the box) --------------------------------------------------------------------
+    Rectangle {
+        visible: root.show-bars;
+        property <length> right-x: root.bx + root.bw + 12px;
+        property <length> left-x: root.bx - 12px - self.width;
+        x: self.right-x + self.width <= root.width - 8px ? self.right-x : self.left-x >= 8px ? self.left-x : root.bx + root.bw - self.width - 8px;
+        y: min(max(72px, root.by), root.height - self.height - 8px);
+        width: 46px;
+        height: tvl.preferred-height;
+        border-radius: 10px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #00000099;
+        tools-ta := TouchArea { }
+        tvl := VerticalLayout {
+            padding: 5px;
+            spacing: 2px;
+            for t[i] in root.tools: VerticalLayout {
+                spacing: 2px;
+                if t.sep: Rectangle { height: 7px; Rectangle { x: 6px; y: 3px; width: parent.width - 12px; height: 1px; background: B.line; } }
+                Rectangle {
+                    // square, like every other icon button (20 Nov 2026 size pass)
+                    height: 36px;
+                    width: 36px;
+                    border-radius: 7px;
+                    background: i == root.tool ? B.accent.with-alpha(0.22) : tta.has-hover ? B.hover : transparent;
+                    Ico {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        commands: t.icon;
+                        stroke: i == root.tool ? B.accent : tta.has-hover ? B.text : B.muted;
+                    }
+                    tta := TouchArea {
+                        clicked => { root.cmd(t.id); }
+                    }
+                    if tta.has-hover: Rectangle {
+                        // name tip on the far side
+                        x: -self.width - 8px;
+                        y: (parent.height - self.height) / 2;
+                        // the keys are in the tip ("Arrow · A, Alt 4"), not squeezed into the button's corner (20 Nov 2026)
+                        width: tipl.preferred-width + 20px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: B.bar;
+                        border-width: 1px;
+                        border-color: B.line;
+                        tipl := HorizontalLayout {
+                            x: 10px;
+                            spacing: 8px;
+                            Text { text: t.name; color: B.text; font-size: 12px; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- size chip + actions (below the box) --------------------------------------------------------------
+    if root.show-bars: Rectangle {
+        x: max(8px, root.bx);
+        y: root.act-y + (root.act-h - self.height) / 2;
+        width: cst.preferred-width + 18px;
+        height: 24px;
+        border-radius: 6px;
+        background: B.accent;
+        visible: root.bw > 260px || !root.act-below;
+        cst := Text { text: root.size-label; color: white; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    Rectangle {
+        visible: root.show-bars;
+        x: min(max(8px, root.bx + root.bw - self.width), root.width - self.width - 8px);
+        y: root.act-y;
+        width: ahl.preferred-width;
+        height: root.act-h;
+        border-radius: 10px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #00000099;
+        acts-ta := TouchArea { }
+        ahl := HorizontalLayout {
+            padding: 5px;
+            spacing: 3px;
+            BarBtn { icon: I.pin; text: root.small ? "" : "Pin"; kbd-plain: root.small ? "" : "Ctrl T"; clicked => { root.cmd("pin"); } }
+            BarBtn { icon: I.save; text: root.small ? "" : "Save"; kbd-plain: root.small ? "" : "Ctrl S"; clicked => { root.cmd("save"); } }
+            BarBtn { icon: I.copy; text: root.small ? "" : "Copy"; kbd-plain: root.small ? "" : "Ctrl C"; clicked => { root.cmd("copy"); } }
+            if root.link-on: BarBtn { icon: I.link; text: root.small ? "" : "Share link"; kbd-plain: root.small ? "" : "Ctrl L"; primary: true; clicked => { root.cmd("link"); } }
+            Rectangle { width: 9px; Rectangle { x: 4px; y: 10px; width: 1px; height: parent.height - 20px; background: B.line; } }
+            BarBtn { icon: I.check; icon-accent: true; kbd-plain: "Enter"; clicked => { root.cmd("done"); } }
+        }
+    }
+
+    // --- key sheet (? / F1) --------------------------------------------------------------------------------
+    if root.keys-sheet: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { root.cmd("keys"); } }
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: max(80px, (root.height - self.height) / 2);
+            width: min(root.width - 40px, 1200px);
+            height: min(root.height - 100px, ksl.preferred-height);
+            border-radius: 12px;
+            background: B.bar;
+            border-width: 1px;
+            border-color: B.line;
+            drop-shadow-blur: 40px;
+            drop-shadow-color: #000000aa;
+            clip: true;
+            TouchArea { }
+            ksl := VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Logo { width: 22px; height: 22px; }
+                    Text { text: "Keys"; color: B.text; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+                    Text { text: "every key can be changed in Settings > Keys"; color: B.muted; font-size: 12.5px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Kbd { text: "Esc"; }
+                }
+                HorizontalLayout {
+                    spacing: 18px;
+                    for col in 3: VerticalLayout {
+                        // no spacing: the rows of the other columns are here too (hidden, 0 px)
+                        spacing: 0;
+                        alignment: start;
+                        for r[i] in root.key-rows: HorizontalLayout {
+                            visible: r.col == col;
+                            height: r.col != col ? 0 : r.head ? 30px : 25px;
+                            spacing: 8px;
+                            if !r.head: Rectangle {
+                                width: 116px;
+                                Kbd { x: parent.width - self.width; y: (parent.height - self.height) / 2; text: r.key; }
+                            }
+                            Text {
+                                text: r.what;
+                                color: r.head ? B.accent : B.text;
+                                font-size: r.head ? 12px : 12.5px;
+                                font-weight: r.head ? 700 : 400;
+                                vertical-alignment: r.head ? bottom : center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- toast + busy -----------------------------------------------------------------------------------------
+    if root.toast != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 120px;
+        width: tt.preferred-width + 28px;
+        height: 36px;
+        border-radius: 10px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #00000099;
+        tt := Text { text: root.toast; color: B.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    if root.busy: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: bt.preferred-width + 40px;
+        height: 44px;
+        border-radius: 10px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        bt := Text { text: root.busy-text; color: B.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}

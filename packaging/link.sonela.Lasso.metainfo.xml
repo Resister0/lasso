@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>link.sonela.Lasso</id>
+  <name>Lasso</name>
+  <summary>Screenshots with every editing tool right on the frozen screen</summary>
+  <developer id="app.sonela">
+    <name>Resister0</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      Press a key and the screen freezes in a blink. Draw a box around what you want, mark it up right there
+      and copy, save or pin it - no separate editor window. Esc closes at once and nothing is lost.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Fast freeze: area, window or whole screen, with a pixel magnifier</li>
+      <li>Pen, highlighter, line, arrow, shapes, text, numbered steps, blur, pixelate, spotlight and a colour picker</li>
+      <li>Copy to the clipboard, save without a dialog, or pin the picture on top of everything</li>
+      <li>A library of older captures whose shapes stay editable</li>
+      <li>Every key can be changed; optional global hotkeys</li>
+      <li>Light on memory while it waits in the tray</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">link.sonela.Lasso.desktop</launchable>
+  <url type="homepage">https://sonela.app/lasso</url>
+  <url type="vcs-browser">https://github.com/Resister0/lasso</url>
+  <url type="bugtracker">https://github.com/Resister0/lasso/issues</url>
+
+  <categories>
+    <category>Graphics</category>
+    <category>Utility</category>
+  </categories>
+
+  <keywords>
+    <keyword>screenshot</keyword>
+    <keyword>screen capture</keyword>
+    <keyword>snip</keyword>
+    <keyword>annotate</keyword>
+    <keyword>blur</keyword>
+  </keywords>
+
+  <provides>
+    <binary>lasso</binary>
+  </provides>
+
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <!-- screenshots: add real ones (hosted on sonela.app) before a Flathub submission -->
+
+  <releases>
+    <release version="0.1.0" date="2026-11-13"/>
+  </releases>
+</component>

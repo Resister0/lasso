@@ -1,0 +1,307 @@
+# Lasso's release build in the PUBLIC repo (github.com/Resister0/lasso): every file people download is built
+# here from the public source, so anyone can check what went into it. This file lives in the private repo as
+# ci/public-build.yml and is copied to .github/workflows/build.yml here on every publish (with ci/version.txt).
+# Same method as Aimdot's (ci/public-build.yml there) and Echo's AppImage / zsync steps.
+#
+# Secrets in THIS (public) repo - all optional; without them the build still runs, just unsigned:
+#   CERTUM_USERNAME, CERTUM_TOTP_SECRET     Windows code signing (Certum Open Source certificate, SimplySign cloud)
+#   LASSO_SIGNING_KEY, LASSO_SIGNING_KEY_PASSWORD   minisign key (Tauri signer format) for the .sig files - Lasso's
+#                                           own key (make one: npx @tauri-apps/cli signer generate). Only the
+#                                           "Update signatures" steps get it, and they run nothing but `signer sign`.
+name: Build Lasso
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+# one publish at a time: two runs side by side both delete + re-create the "latest" release. Queued, not cancelled.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+env:
+  # Tauri's CLI pinned to one exact version (the NSIS packer + the update signer): an unpinned "@2" would run whatever
+  # was published last, next to the signing key
+  TAURI_CLI: "@tauri-apps/cli@2.12.4"
+jobs:
+  windows:
+    if: github.repository == 'Resister0/lasso'
+    runs-on: windows-latest
+    env:
+      # only WHETHER signing is set up - the secrets themselves go to the signing steps alone, never into the job
+      HAS_CERTUM: ${{ secrets.CERTUM_TOTP_SECRET != '' && secrets.CERTUM_USERNAME != '' }}
+      HAS_UPDATE_KEY: ${{ secrets.LASSO_SIGNING_KEY != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Version
+        # ci/version.txt = the number the private repo gave this publish; goes into the exe (About page)
+        shell: bash
+        run: |
+          V=$(cat ci/version.txt 2>/dev/null | tr -d ' \r\n'); [ -n "$V" ] || V="0.1.0"
+          sed -i '0,/^version = "0.1.0"/s//version = "'"$V"'"/' Cargo.toml
+          echo "LASSO_VERSION=$V" >> "$GITHUB_ENV"
+          grep -m1 '^version' Cargo.toml
+      - name: Build
+        shell: bash
+        # LASSO_RELEASE=1: a published build (the daily count + update checks only run in these, never in own builds)
+        env:
+          LASSO_RELEASE: "1"
+          LASSO_UPDATE_PUBKEY: ${{ vars.LASSO_UPDATE_PUBKEY }}
+        run: |
+          cargo build --release
+          cargo test --release
+          ls -la target/release/lasso.exe
+      - name: Code signing login (Certum)
+        # Certum "Open Source Code Signing in the Cloud" (same action + commit as Aimdot's / Echo's builds). Not set =
+        # unsigned build; a failed login doesn't stop the release (unsigned then, with a warning).
+        id: certum
+        if: env.HAS_CERTUM == 'true'
+        continue-on-error: true
+        uses: jay0lee/certum-cloud-code-sign@a3324503499c49090869856eeeecfe95fb613d87 # v1
+        with:
+          username: ${{ secrets.CERTUM_USERNAME }}
+          totp_secret: ${{ secrets.CERTUM_TOTP_SECRET }}
+      - name: Sign the program
+        # signed in place (target/release), so the zip AND the installer carry the signed copy
+        shell: bash
+        env:
+          SIGNTOOL: ${{ steps.certum.outputs.signtool-path }}
+          CERT_SHA1: ${{ steps.certum.outputs.cert-thumbprint }}
+        run: |
+          if [ -n "$SIGNTOOL" ] && [ -n "$CERT_SHA1" ]; then
+            # MSYS_NO_PATHCONV: Git Bash would turn /fd, /pa ... into paths
+            ST=$(printf '%s' "$SIGNTOOL" | tr '\\\\' '/')
+            MSYS_NO_PATHCONV=1 "$ST" sign /sha1 "$CERT_SHA1" /tr http://time.certum.pl /td SHA256 /fd SHA256 target/release/lasso.exe
+            MSYS_NO_PATHCONV=1 "$ST" verify /pa target/release/lasso.exe
+            echo "Signed with Certum certificate $CERT_SHA1"
+            echo yes > signed-windows.txt
+          else
+            echo "::warning::Not code-signed (Certum secrets not set or the login failed)"
+          fi
+      - name: Portable zip
+        # the second Windows download: unzip anywhere, no install. Its .sig is made last (it covers the signed bytes).
+        shell: bash
+        run: |
+          rm -rf pack && mkdir -p pack/Lasso
+          cp target/release/lasso.exe LICENSE pack/Lasso/
+          printf '%s\r\n' "Lasso $LASSO_VERSION for Windows (64-bit) - portable" "" \
+            "Most people want Lasso-Setup.exe instead (Start menu entry, no admin needed)." "" \
+            "1. Unzip this folder somewhere you keep it (for example Documents\\Lasso) - autostart remembers where it is." \
+            "2. Start lasso.exe. It waits in the tray; click the tray icon (or use your capture key) to take a screenshot." "" \
+            "Free software under the GNU GPL v3 or later (LICENSE). Source: https://github.com/Resister0/lasso" > pack/Lasso/README.txt
+          (cd pack && 7z a -tzip -mx=9 ../Lasso-Windows.zip Lasso >/dev/null)
+          ls -la Lasso-Windows.zip
+      - name: Installer (Lasso-Setup.exe)
+        # Tauri's NSIS bundler used ONLY as a packer (`tauri bundle` builds nothing) - packaging/installer/. Per-user
+        # install into %LOCALAPPDATA%\Lasso (no admin), Start menu entry, uninstall entry.
+        # Certum signs lasso.exe, the uninstaller and the setup itself through signCommand.
+        # No continue-on-error: a release without the Windows installer must not go out.
+        shell: bash
+        working-directory: packaging/installer
+        env:
+          SIGNTOOL: ${{ steps.certum.outputs.signtool-path }}
+          CERT_SHA1: ${{ steps.certum.outputs.cert-thumbprint }}
+        run: |
+          V="$LASSO_VERSION"
+          SIGN=""
+          if [ -n "$SIGNTOOL" ] && [ -n "$CERT_SHA1" ]; then
+            ST=$(printf '%s' "$SIGNTOOL" | tr '\\\\' '/')
+            # goes right after "windows":{ in the --config JSON below (hence the comma at the END)
+            SIGN='"signCommand":{"cmd":"'"$ST"'","args":["sign","/sha1","'"$CERT_SHA1"'","/tr","http://time.certum.pl","/td","SHA256","/fd","SHA256","%1"]},'
+          fi
+          # the bundler looks for target/release/lasso.exe in the cargo target folder: the main one
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" npx --yes "$TAURI_CLI" bundle --bundles nsis \
+            --config '{"version":"'"$V"'","bundle":{"windows":{'"$SIGN"'"webviewInstallMode":{"type":"skip"}}}}'
+          cp "$GITHUB_WORKSPACE"/target/release/bundle/nsis/*-setup.exe ../../Lasso-Setup.exe
+          if [ -n "$SIGN" ]; then
+            MSYS_NO_PATHCONV=1 "$ST" verify /pa ../../Lasso-Setup.exe || echo "::warning::Lasso-Setup.exe signature doesn't verify"
+          fi
+          ls -la ../../Lasso-Setup.exe
+          # the pinned CLI is now in npx's cache, so the signing step below downloads nothing
+          [ "$HAS_UPDATE_KEY" = true ] || echo "no update signatures (secret LASSO_SIGNING_KEY not set)"
+      - name: Update signatures (zip + setup)
+        # the minisign key + password exist ONLY in this step, which runs nothing but the pinned CLI's `signer sign`
+        if: env.HAS_UPDATE_KEY == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.LASSO_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.LASSO_SIGNING_KEY_PASSWORD }}
+        run: |
+          for F in Lasso-Windows.zip Lasso-Setup.exe; do npx --yes "$TAURI_CLI" signer sign "$F"; test -s "$F.sig"; done
+      - name: Code signing logout
+        if: always() && steps.certum.outcome == 'success'
+        uses: jay0lee/certum-cloud-code-sign/teardown@a3324503499c49090869856eeeecfe95fb613d87 # v1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows
+          path: |
+            Lasso-Setup.exe
+            Lasso-Setup.exe.sig
+            Lasso-Windows.zip
+            Lasso-Windows.zip.sig
+            signed-windows.txt
+          if-no-files-found: warn
+
+  linux:
+    if: github.repository == 'Resister0/lasso'
+    # Ubuntu 22.04 = older system libraries, so the build also runs on newer distros (Fedora / Nobara, Arch, Ubuntu 24...)
+    runs-on: ubuntu-22.04
+    env:
+      HAS_UPDATE_KEY: ${{ secrets.LASSO_SIGNING_KEY != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: System libraries
+        # give up a stuck download after 30 s and retry (a slow mirror once hung Echo's build for 40+ minutes)
+        timeout-minutes: 30
+        run: |
+          APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update
+          # libdbus-1-dev: libdbus-sys (KWin screenshot, tray, hotkeys portal); libwayland-dev + libxkbcommon-dev: the
+          # layer-shell overlay; fontconfig/freetype: Slint's software + femtovg renderers; libxkbcommon-x11-0: bundled below
+          sudo apt-get $APT install -y pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libwayland-dev libdbus-1-dev libfuse2 file patchelf zsync
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Version
+        run: |
+          V=$(cat ci/version.txt 2>/dev/null | tr -d ' \r\n'); [ -n "$V" ] || V="0.1.0"
+          sed -i '0,/^version = "0.1.0"/s//version = "'"$V"'"/' Cargo.toml
+          echo "LASSO_VERSION=$V" >> "$GITHUB_ENV"
+          grep -m1 '^version' Cargo.toml
+      - name: Build
+        # LASSO_RELEASE=1: a published build (the daily count + update checks only run in these, never in own builds)
+        env:
+          LASSO_RELEASE: "1"
+          LASSO_UPDATE_PUBKEY: ${{ vars.LASSO_UPDATE_PUBKEY }}
+        run: |
+          cargo build --release
+          cargo test --release
+          ldd target/release/lasso
+      - name: Plain build (tar.gz)
+        run: |
+          rm -rf Lasso-linux && mkdir -p Lasso-linux
+          cp target/release/lasso LICENSE Lasso-linux/
+          cp packaging/link.sonela.Lasso.desktop packaging/icons/hicolor/256x256/apps/link.sonela.Lasso.png Lasso-linux/
+          cat > Lasso-linux/README.txt <<TXT
+          Lasso $LASSO_VERSION for Linux (x86_64)
+          Start: ./lasso   (waits in the tray; ./lasso --region = capture an area, ./lasso --quit = stop it)
+          Needs fontconfig + xkbcommon (every desktop has them). Made for KDE Plasma (Wayland) first; the first start writes
+          Lasso's menu entry into ~/.local/share/applications - on KDE that is what lets Lasso take a screenshot silently.
+          Free software under the GNU GPL v3 or later (LICENSE). Source: https://github.com/Resister0/lasso
+          TXT
+          tar -czf Lasso-linux-x86_64.tar.gz Lasso-linux
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: AppImage
+        # one file for most distros: lasso + the libraries linuxdeploy gathers. Updates itself through zsync
+        # (AppImageUpdate / AppImageLauncher / Gear Lever read the update information inside).
+        # Not bundled (the PC's own copies): libwayland-*, libxkbcommon* (winit loads them by name), libdbus.
+        # Exception (Echo's lesson): libxkbcommon-x11.so.0 + libxcb-xkb.so.1 ARE bundled - winit loads them by name on
+        # X11 and panics without them; they need an $ORIGIN RUNPATH to find each other.
+        # ⚠ KWin's screenshot permission: KWin matches the RUNNING exe path against the installed .desktop Exec. Lasso
+        # writes its own .desktop with Exec="$APPIMAGE" (src/desktop.rs), but the AppImage's exe is in a temporary mount -
+        # test this on KDE before telling people the AppImage works (notes: LASSO_STATE.md).
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          NO_STRIP: 1
+          INFO: gh-releases-zsync|Resister0|lasso|latest|Lasso-x86_64.AppImage.zsync
+        run: |
+          T=$RUNNER_TEMP/appimage; rm -rf "$T" AppDir Lasso-x86_64.AppImage*; mkdir -p "$T/stage"
+          # linuxdeploy + appimagetool pinned to fixed releases + fingerprints (linuxdeploy: same file as Echo's / Aimdot's
+          # build; appimagetool 1.9.1 instead of the "continuous" build, which changes under the same name)
+          curl -fsSL --retry 3 -o "$T/linuxdeploy" https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          echo "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  $T/linuxdeploy" | sha256sum -c -
+          curl -fsSL --retry 3 -o "$T/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $T/appimagetool" | sha256sum -c -
+          chmod +x "$T/linuxdeploy" "$T/appimagetool"
+          # the id = Lasso's Wayland app_id / X11 class (src/desktop.rs APP_ID): desktop file + icon must have exactly
+          # that name, or KDE / GNOME show no icon
+          ID=link.sonela.Lasso
+          cp packaging/icons/hicolor/256x256/apps/$ID.png "$T/stage/$ID.png"
+          cp packaging/$ID.desktop "$T/stage/$ID.desktop"
+          "$T/linuxdeploy" --appdir AppDir -e target/release/lasso \
+            -d "$T/stage/$ID.desktop" -i "$T/stage/$ID.png" \
+            --exclude-library 'libwayland-*' --exclude-library 'libxkbcommon*' --exclude-library 'libdbus-1.so*'
+          test -x AppDir/usr/bin/lasso
+          for L in libxkbcommon-x11.so.0 libxcb-xkb.so.1; do cp -L "/usr/lib/x86_64-linux-gnu/$L" AppDir/usr/lib/; done
+          # hand-copied libraries get no RUNPATH from linuxdeploy (Echo's AppImageHub retest failed on exactly that)
+          for L in libxkbcommon-x11.so.0 libxcb-xkb.so.1; do patchelf --set-rpath '$ORIGIN' "AppDir/usr/lib/$L"; done
+          readelf -d AppDir/usr/lib/libxkbcommon-x11.so.0 | grep -q 'RUNPATH.*\$ORIGIN' || { echo 'libxkbcommon-x11 has no $ORIGIN RUNPATH'; exit 1; }
+          if ldd AppDir/usr/lib/libxkbcommon-x11.so.0 | grep 'not found'; then echo "bundled libxkbcommon-x11 misses libraries"; exit 1; fi
+          ls AppDir/usr/lib; du -sh AppDir
+          ARCH=x86_64 "$T/appimagetool" --no-appstream -u "$INFO" AppDir Lasso-x86_64.AppImage
+          chmod +x Lasso-x86_64.AppImage
+          # read the update information - don't RUN the AppImage (it would start Lasso on a runner without a display)
+          objcopy --dump-section .upd_info="$T/upd_info" Lasso-x86_64.AppImage /dev/null
+          info=$(tr -d '\0' < "$T/upd_info")
+          case "$info" in gh-releases-zsync*) echo "update information: $info" ;; *) echo "no update information: '$info'"; exit 1 ;; esac
+          # .zsync from the final file (AppImageUpdate / AppImageLauncher); the .sig doesn't change the AppImage
+          zsyncmake -u Lasso-x86_64.AppImage -o Lasso-x86_64.AppImage.zsync Lasso-x86_64.AppImage
+          rm -rf AppDir
+          ls -la Lasso-x86_64.AppImage*
+          # fetch the pinned CLI now (no key in this step), so the signing step below downloads nothing
+          if [ "$HAS_UPDATE_KEY" = true ]; then npx --yes "$TAURI_CLI" --version; else echo "no update signature (secret LASSO_SIGNING_KEY not set)"; fi
+      - name: Update signature (AppImage)
+        # minisign signature (base64, Tauri signer format) - for checking by hand / a future updater. The key + password
+        # exist ONLY in this step, which runs nothing but the pinned CLI's `signer sign`
+        if: env.HAS_UPDATE_KEY == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.LASSO_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.LASSO_SIGNING_KEY_PASSWORD }}
+        run: |
+          npx --yes "$TAURI_CLI" signer sign Lasso-x86_64.AppImage
+          test -s Lasso-x86_64.AppImage.sig
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux
+          path: |
+            Lasso-linux-x86_64.tar.gz
+            Lasso-x86_64.AppImage
+            Lasso-x86_64.AppImage.sig
+            Lasso-x86_64.AppImage.zsync
+          if-no-files-found: warn
+
+  release:
+    # publishes whatever built (one OS failing doesn't block the other)
+    needs: [windows, linux]
+    if: always() && (needs.windows.result == 'success' || needs.linux.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: out
+      - name: Publish as "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          msg=$(git log -1 --pretty=%s)
+          # the commit subject goes into the release text (and sonela.app's "What's new"). The private repo's leak check
+          # passed it already; this is the second net (e-mail addresses, home-folder paths, keys - the private words are
+          # a secret of the private repo only)
+          if printf '%s\n' "$msg" | grep -qE '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}|/home/[a-z][a-z0-9_-]*/|[Cc]:\\+Users\\+[A-Za-z]|github_pat_|gh[pousr]_[A-Za-z0-9]{30}|BEGIN [A-Z ]*PRIVATE KEY'; then
+            echo "::error::the commit subject looks like it holds an e-mail address, a home-folder path or a key - not published"; exit 1
+          fi
+          V=$(cat ci/version.txt 2>/dev/null | tr -d ' \r\n'); [ -n "$V" ] || V="0.1.0"
+          mkdir -p rel && find out -type f -exec cp {} rel/ \;
+          # signed-windows.txt = the Windows job's note that the exe was code-signed (not released itself)
+          signed="not code-signed yet"
+          [ -f rel/signed-windows.txt ] && signed="signed with a Certum open-source code-signing certificate"
+          rm -f rel/signed-windows.txt
+          (cd rel && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          notes="Built from: $msg
+
+          Windows: download Lasso-Setup.exe - it installs Lasso for you (no admin), with a Start menu entry. No install wanted? Lasso-Windows.zip (portable): unzip it somewhere you keep it and start lasso.exe. The program is $signed. If Windows says it protected your PC, click More info > Run anyway.
+          Linux: download Lasso-x86_64.AppImage, make it runnable (right-click > Properties > Allow executing, or chmod +x) and start it - it updates itself (AppImageUpdate). Lasso-linux-x86_64.tar.gz = the plain program.
+          SHA256SUMS lists every file's fingerprint; the .sig files are minisign signatures.
+
+          Windows build: ${{ needs.windows.result }} / Linux build: ${{ needs.linux.result }}"
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest rel/* --title "Lasso $V" --notes "$notes"

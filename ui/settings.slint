@@ -1,0 +1,574 @@
+// Settings - "a decent bit of customizability" (the user, 13 Nov 2026), in a mini Aimdot window.
+// Every change is written to config.ini at once and the running Lasso is told to reload (windows_ui.rs).
+
+import { T, Ic, Btn, Switch, Slider, Opt, Seg, NavBtn, Card, Row, Note, Kbd } from "theme.slint";
+import { TitleBar, Edges } from "winframe.slint";
+
+export struct KeyBind {
+    id: string,
+    name: string,
+    keys: string,
+    clash: bool,
+}
+
+export struct HkRow {
+    id: string,
+    name: string,
+    key: string,
+    kde: string,
+}
+
+export struct ToolToggle {
+    id: string,
+    name: string,
+    on: bool,
+}
+
+component KeyChip inherits Rectangle {
+    in property <string> text;
+    in property <bool> listening;
+    in property <bool> bad;
+    callback clicked;
+    height: 32px;
+    width: max(90px, kt.preferred-width + 24px);
+    border-radius: T.r-btn;
+    background: root.listening ? T.accent.with-alpha(0.16) : ta.has-hover ? T.panel2 : T.bg;
+    border-width: 1px;
+    border-color: root.listening ? T.accent : root.bad ? T.bad : ta.has-hover ? T.hover : T.line;
+    kt := Text {
+        text: root.listening ? "Press a key..." : root.text == "" ? "No key" : root.text;
+        font-size: 12.5px;
+        font-weight: 500;
+        color: root.listening ? T.accent2 : root.text == "" ? T.dim : T.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: "Lasso Settings";
+    icon: @image-url("../assets/icons/lasso-64.png");
+    no-frame: true;
+    preferred-width: 820px;
+    preferred-height: 600px;
+    min-width: 640px;
+    min-height: 440px;
+    background: T.bg;
+    default-font-size: 14px;
+    forward-focus: keys-fs;
+
+    in property <bool> win-max;
+    in-out property <int> page: 0;
+    in property <string> version;
+    // General
+    in property <int> enter-does;
+    in property <bool> always-copy;
+    in property <string> save-dir;
+    in-out property <string> name-pattern;
+    in property <string> name-example;
+    in property <int> format;
+    in property <bool> fits-discord;
+    in property <int> theme;
+    in property <bool> autostart;
+    in property <string> accent-id;
+    in property <bool> sounds;
+    // share links
+    in property <string> share-email;
+    in property <bool> share-code-step;
+    in property <string> share-msg;
+    in property <bool> share-busy;
+    in property <bool> share-check;
+    in property <bool> share-both;
+    in property <bool> share-once;
+    // Capture
+    in property <int> delay;
+    in property <bool> pointer;
+    in property <int> full-mode;
+    in property <bool> thumb-after-full;
+    in property <bool> remember-tool;
+    in property <bool> magnifier;
+    in property <bool> usage-ping;
+    // About > Updates (src/update.rs): a newer Lasso is known, status line, "Update now" / "Download" / "Updating…"
+    in property <bool> upd-available;
+    in property <string> upd-version;
+    in property <string> upd-notes;
+    in property <string> upd-status;
+    in property <string> upd-button: "Update now";
+    in property <bool> upd-busy;
+    in property <bool> upd-can-check;
+    in property <bool> edits-as-copy;
+    // Keys
+    in property <[KeyBind]> binds;
+    in property <string> listening;
+    in property <string> clash-text;
+    // Hotkeys
+    in property <bool> hotkeys-on;
+    in property <[HkRow]> hotkeys;
+    in property <string> hk-note;
+    // Library
+    in property <float> keep-count;
+    in property <int> library-keep;
+    in property <float> keep-days;
+    in property <int> link-expiry;
+    in property <bool> share-on;
+    in property <[ToolToggle]> tool-toggles;
+    in property <string> folder-note;
+
+    callback win-act(string);
+    callback set(string, string);
+    callback act(string);
+    callback listen(string);
+    callback key-captured(string, bool, bool, bool) -> bool;
+
+    keys-fs := FocusScope {
+        key-pressed(e) => {
+            if root.listening != "" {
+                if root.key-captured(e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt) {
+                    return accept;
+                }
+            }
+            reject
+        }
+    }
+
+    VerticalLayout {
+        TitleBar {
+            title: "Lasso";
+            sub: "Settings";
+            win-max: root.win-max;
+            win-act(a) => { root.win-act(a); }
+        }
+        HorizontalLayout {
+            // rail
+            Rectangle {
+                width: 196px;
+                background: T.rail;
+                Rectangle { x: parent.width - 1px; width: 1px; background: T.line; }
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 4px;
+                    alignment: start;
+                    for p[i] in [
+                        { label: "General", icon: Ic.gear },
+                        { label: "Capture", icon: "M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0z" },
+                        { label: "Editor keys", icon: Ic.keys },
+                        { label: "Global hotkeys", icon: "M12 3v6M8 5.5a7 7 0 1 0 8 0" },
+                        { label: "Library & tools", icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" },
+                        { label: "About", icon: Ic.info },
+                    ]: NavBtn {
+                        label: p.label;
+                        icon: p.icon;
+                        on: root.page == i;
+                        clicked => { root.page = i; }
+                    }
+                }
+            }
+            // pages
+            Flickable {
+                content-height: pages.preferred-height;
+                pages := VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    alignment: start;
+                    if root.page == 0: VerticalLayout {
+                        spacing: 14px;
+                        Text { text: "General"; font-size: 20px; font-weight: 700; color: T.text; }
+                        Card {
+                            title: "When you're done";
+                            Row {
+                                label: "Enter (and the ✓ button) does";
+                                sub: "Copy, Save, Pin and Share link close the frozen screen; Esc keeps it for Restore";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "Copy", value: 0 }, { label: "Save", value: 1 }, { label: "Copy + save", value: 2 }, { label: "Link", value: 3 }];
+                                    value: root.enter-does;
+                                    picked(v) => { root.set("enter_does", v == 1 ? "save" : v == 2 ? "copysave" : v == 3 ? "link" : "copy"); }
+                                }
+                            }
+                            Row {
+                                label: "Always copy the picture";
+                                sub: "also when you save - paste it anywhere right after";
+                                Switch { y: (parent.height - self.height) / 2; on: root.always-copy; toggled(v) => { root.set("always_copy", v ? "1" : "0"); } }
+                            }
+                            Row {
+                                label: "Fits Discord, always";
+                                sub: "pictures over 10 MB get smaller (lossless first, then JPEG) - no \"file too large\"";
+                                Switch { y: (parent.height - self.height) / 2; on: root.fits-discord; toggled(v) => { root.set("fits_discord", v ? "1" : "0"); } }
+                            }
+                        }
+                        Card {
+                            title: "Saving";
+                            Row {
+                                label: "Save folder";
+                                sub: root.save-dir;
+                                Btn { y: (parent.height - self.height) / 2; small: true; text: "Change"; clicked => { root.act("pick-folder"); } }
+                                Btn { y: (parent.height - self.height) / 2; small: true; text: "Open"; clicked => { root.act("open-folder"); } }
+                            }
+                            Row {
+                                label: "File name";
+                                sub: "{yyyy} {MM} {dd} {HH} {mm} {ss}, {app} = the app or game (\"Lasso\" when unknown) - now: " + root.name-example;
+                                Rectangle {
+                                    width: 260px;
+                                    height: 32px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: T.r-btn;
+                                    background: T.bg;
+                                    border-width: 1px;
+                                    border-color: ti.has-focus ? T.accent : T.line;
+                                    ti := TextInput {
+                                        x: 10px;
+                                        width: parent.width - 20px;
+                                        vertical-alignment: center;
+                                        text: root.name-pattern;
+                                        color: T.text;
+                                        font-size: 13px;
+                                        single-line: true;
+                                        edited => { root.set("name_pattern", self.text); }
+                                    }
+                                }
+                            }
+                            Row {
+                                label: "Format";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "PNG", value: 0 }, { label: "JPG", value: 1 }, { label: "WebP", value: 2 }];
+                                    value: root.format;
+                                    picked(v) => { root.set("format", v == 1 ? "jpg" : v == 2 ? "webp" : "png"); }
+                                }
+                            }
+                        }
+                        Card {
+                            title: "Start";
+                            Row {
+                                label: "Start Lasso with your PC";
+                                sub: "it waits in the tray (small, nothing runs until you capture)";
+                                Switch { y: (parent.height - self.height) / 2; on: root.autostart; toggled(v) => { root.set("autostart", v ? "1" : "0"); } }
+                            }
+                            Row {
+                                label: "Sounds";
+                                sub: "a soft click when the screen freezes, a chime when copied / saved";
+                                Switch { y: (parent.height - self.height) / 2; on: root.sounds; toggled(v) => { root.set("sounds", v ? "1" : "0"); } }
+                            }
+                        }
+                        Card {
+                            title: "Look";
+                            Row {
+                                label: "Bars on the frozen screen";
+                                sub: "Lasso teal, dark or light panels";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "Follow system", value: 0 }, { label: "Dark", value: 1 }, { label: "Light", value: 2 }];
+                                    value: root.theme;
+                                    picked(v) => { root.set("theme", v == 1 ? "dark" : v == 2 ? "light" : "system"); }
+                                }
+                            }
+                            Row {
+                                label: "Accent colour";
+                                sub: "the box, the picked tool, the main buttons (Lasso teal by default)";
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    for a in [{ id: "teal", c: #14a38b }, { id: "blue", c: #3b82f6 }, { id: "purple", c: #8b5cf6 }, { id: "coral", c: #ef6a4c }, { id: "pink", c: #ec4899 }, { id: "amber", c: #f59e0b }]: Rectangle {
+                                        width: 26px;
+                                        Rectangle {
+                                            y: (parent.height - 22px) / 2;
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
+                                            background: a.c;
+                                            border-width: root.accent-id == a.id ? 2px : 0;
+                                            border-color: T.text;
+                                        }
+                                        TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => { root.set("accent", a.id); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.page == 1: VerticalLayout {
+                        spacing: 14px;
+                        Text { text: "Capture"; font-size: 20px; font-weight: 700; color: T.text; }
+                        Card {
+                            title: "Taking the picture";
+                            Row {
+                                label: "Timer";
+                                sub: "wait before the screen freezes (the Timer button on the frozen screen changes it too)";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "Off", value: 0 }, { label: "3 s", value: 3 }, { label: "5 s", value: 5 }, { label: "10 s", value: 10 }];
+                                    value: root.delay;
+                                    picked(v) => { root.set("delay", v); }
+                                }
+                            }
+                            Row {
+                                label: "Include the mouse pointer";
+                                Switch { y: (parent.height - self.height) / 2; on: root.pointer; toggled(v) => { root.set("pointer", v ? "1" : "0"); } }
+                            }
+                            Row {
+                                label: "Full screenshot takes";
+                                sub: "the full-screenshot key: copied + saved at once, no frozen screen";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "Monitor in use", value: 0 }, { label: "All", value: 1 }, { label: "Left", value: 2 }, { label: "2nd", value: 3 }, { label: "3rd", value: 4 }];
+                                    value: root.full-mode;
+                                    picked(v) => { root.set("full_mode", v == 1 ? "all" : v >= 2 ? v - 1 : "mouse"); }
+                                }
+                            }
+                            Row {
+                                label: "Magnifier while picking";
+                                sub: "a zoomed view of the pixels next to the mouse, for exact boxes";
+                                Switch { y: (parent.height - self.height) / 2; on: root.magnifier; toggled(v) => { root.set("magnifier", v ? "1" : "0"); } }
+                            }
+                            Row {
+                                label: "Corner thumbnail after a capture";
+                                sub: "drag it into Discord, a browser or a folder; click it to mark the picture up";
+                                Switch { y: (parent.height - self.height) / 2; on: root.thumb-after-full; toggled(v) => { root.set("thumb_after_full", v ? "1" : "0"); } }
+                            }
+                        }
+                        Card {
+                            title: "Editing";
+                            Row {
+                                label: "Start with the last tool you used";
+                                sub: "off = a new box starts with Select: dragging inside moves the box";
+                                Switch { y: (parent.height - self.height) / 2; on: root.remember-tool; toggled(v) => { root.set("remember_tool", v ? "1" : "0"); } }
+                            }
+                            Row {
+                                label: "Editing a saved picture again";
+                                sub: "the untouched original always stays in the library (\"Back to original\")";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "Replace the file", value: 0 }, { label: "Save a new copy", value: 1 }];
+                                    value: root.edits-as-copy ? 1 : 0;
+                                    picked(v) => { root.set("edits_as_copy", v); }
+                                }
+                            }
+                        }
+                    }
+                    if root.page == 2: VerticalLayout {
+                        spacing: 14px;
+                        HorizontalLayout {
+                            Text { text: "Keys on the frozen screen"; font-size: 20px; font-weight: 700; color: T.text; horizontal-stretch: 1; }
+                            Btn { small: true; text: "Reset all to default"; clicked => { root.act("reset-keys"); } }
+                        }
+                        Note { text: "Click a key to change it, then press the new one. Esc or Backspace removes it. Ctrl+letter keys work on every keyboard layout."; }
+                        if root.clash-text != "": Text { text: root.clash-text; color: T.warn; font-size: 13px; wrap: word-wrap; }
+                        Card {
+                            for b in root.binds: Row {
+                                label: b.name;
+                                KeyChip {
+                                    y: (parent.height - self.height) / 2;
+                                    text: b.keys;
+                                    bad: b.clash;
+                                    listening: root.listening == b.id;
+                                    clicked => {
+                                        root.listen(b.id);
+                                        keys-fs.focus();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.page == 3: VerticalLayout {
+                        spacing: 14px;
+                        Text { text: "Global hotkeys"; font-size: 20px; font-weight: 700; color: T.text; }
+                        Card {
+                            title: "Use global hotkeys";
+                            has-switch: true;
+                            on: root.hotkeys-on;
+                            toggled(v) => { root.set("hotkeys", v ? "1" : "0"); }
+                            Note { text: "Off until you turn it on. On KDE, Plasma asks once and then owns the keys: change them later in System Settings > Shortcuts > Lasso. Without hotkeys: click the tray icon, or bind \"lasso --region\" in your desktop's shortcut settings."; }
+                            Row {
+                                label: "Want the Print key?";
+                                sub: "it belongs to Spectacle on KDE and to Snipping Tool on Windows - free it there first, then set it here";
+                                Btn { y: (parent.height - self.height) / 2; small: true; text: "Open the system's shortcut settings"; clicked => { root.act("system-keys"); } }
+                            }
+                            if root.hk-note != "": Text { text: root.hk-note; color: T.muted; font-size: 12.5px; wrap: word-wrap; }
+                            for h in root.hotkeys: Row {
+                                label: h.name;
+                                sub: h.kde != "" ? "KDE uses: " + h.kde : "";
+                                KeyChip {
+                                    y: (parent.height - self.height) / 2;
+                                    text: h.key;
+                                    listening: root.listening == "hk." + h.id;
+                                    clicked => {
+                                        root.listen("hk." + h.id);
+                                        keys-fs.focus();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.page == 4: VerticalLayout {
+                        spacing: 14px;
+                        Text { text: "Library & tools"; font-size: 20px; font-weight: 700; color: T.text; }
+                        Card {
+                            title: "Library";
+                            Row {
+                                label: "Keep the last";
+                                val: round(root.keep-count) + " captures";
+                                Slider { y: (parent.height - self.height) / 2; lo: 20; hi: 2000; step: 10; value: root.keep-count; moved(v) => { root.set("keep_count", round(v)); } }
+                            }
+                            Row {
+                                label: "Keep for";
+                                val: round(root.keep-days) + " days";
+                                Slider { y: (parent.height - self.height) / 2; lo: 7; hi: 365; step: 1; value: root.keep-days; moved(v) => { root.set("keep_days", round(v)); } }
+                            }
+                            Row {
+                                label: "What goes in";
+                                sub: "used = copied, saved, pinned or shared. Esc still brings the last one back (tray); Shift+Esc throws it away";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "Used ones", value: 0 }, { label: "Every capture", value: 1 }, { label: "Nothing", value: 2 }];
+                                    value: root.library-keep;
+                                    picked(v) => { root.set("library_keep", v == 1 ? "all" : v == 2 ? "none" : "used"); }
+                                }
+                            }
+                            Note { text: root.folder-note; }
+                        }
+                        Card {
+                            title: "Share links";
+                            has-switch: true;
+                            on: root.share-on;
+                            toggled(v) => { root.set("share_on", v ? "1" : "0"); }
+                            if !root.share-on: Note { text: "Off: links like sonela.app/s/... need the Sonela server update first - until then the Share link button copies the picture. The account is the Echo Cloud one (email + 6-digit code, no password)."; }
+                            if root.share-on && root.share-email != "": Row {
+                                label: "Signed in as " + root.share-email;
+                                Btn { y: (parent.height - self.height) / 2; small: true; text: "Sign out"; enabled: !root.share-busy; clicked => { root.act("share-out"); } }
+                            }
+                            if root.share-on && root.share-email == "": Row {
+                                label: root.share-code-step ? "The 6-digit code from the email" : "Your email (Echo Cloud / Sonela account)";
+                                Rectangle {
+                                    width: 220px;
+                                    height: 32px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: T.r-btn;
+                                    background: T.bg;
+                                    border-width: 1px;
+                                    border-color: sin.has-focus ? T.accent : T.line;
+                                    sin := TextInput {
+                                        x: 10px;
+                                        width: parent.width - 20px;
+                                        vertical-alignment: center;
+                                        color: T.text;
+                                        font-size: 13px;
+                                        single-line: true;
+                                        accepted => { root.act((root.share-code-step ? "share-code:" : "share-send:") + self.text); }
+                                    }
+                                }
+                                Btn {
+                                    y: (parent.height - self.height) / 2;
+                                    small: true;
+                                    primary: true;
+                                    enabled: !root.share-busy;
+                                    text: root.share-code-step ? "Sign in" : "Send code";
+                                    clicked => { root.act((root.share-code-step ? "share-code:" : "share-send:") + sin.text); }
+                                }
+                            }
+                            if root.share-on && root.share-msg != "": Text { text: root.share-msg; color: T.muted; font-size: 12.5px; wrap: word-wrap; }
+                            if root.share-on: Row {
+                                label: "Look for private info before sharing";
+                                sub: "emails, phone numbers, keys: Lasso asks before the upload";
+                                Switch { y: (parent.height - self.height) / 2; on: root.share-check; toggled(v) => { root.set("share_check", v ? "1" : "0"); } }
+                            }
+                            if root.share-on: Row {
+                                label: "Copy the picture too";
+                                sub: "chat apps paste the picture, text boxes the link (KDE; Windows copies the link)";
+                                Switch { y: (parent.height - self.height) / 2; on: root.share-both; toggled(v) => { root.set("share_copy", v ? "both" : "link"); } }
+                            }
+                            if root.share-on: Row {
+                                label: "View-once links";
+                                sub: "the picture is deleted after the first view";
+                                Switch { y: (parent.height - self.height) / 2; on: root.share-once; toggled(v) => { root.set("share_once", v ? "1" : "0"); } }
+                            }
+                            Row {
+                                label: "Links expire after";
+                                Seg {
+                                    compact: true;
+                                    opts: [{ label: "1 day", value: 1 }, { label: "7 days", value: 7 }, { label: "30 days", value: 30 }, { label: "Never", value: 0 }];
+                                    value: root.link-expiry;
+                                    picked(v) => { root.set("link_expiry", v); }
+                                }
+                            }
+                        }
+                        Card {
+                            title: "Tools you see";
+                            HorizontalLayout {
+                                Note { text: "Switch tools off to hide them (their keys still work); the arrows change the strip's order."; horizontal-stretch: 1; }
+                                Btn { small: true; text: "Default order"; clicked => { root.act("tool-order-reset"); } }
+                            }
+                            for t[i] in root.tool-toggles: Row {
+                                label: t.name;
+                                Btn { y: (parent.height - self.height) / 2; small: true; icon: "M6 15l6-6l6 6"; enabled: i > 0; clicked => { root.act("tool-up:" + t.id); } }
+                                Btn { y: (parent.height - self.height) / 2; small: true; icon: "M6 9l6 6l6-6"; enabled: i < root.tool-toggles.length - 1; clicked => { root.act("tool-down:" + t.id); } }
+                                Switch { y: (parent.height - self.height) / 2; on: t.on; toggled(v) => { root.set("tool." + t.id, v ? "1" : "0"); } }
+                            }
+                        }
+                    }
+                    if root.page == 5: VerticalLayout {
+                        spacing: 14px;
+                        HorizontalLayout {
+                            spacing: 14px;
+                            Image { width: 56px; height: 56px; source: @image-url("../assets/icons/lasso.svg"); }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Sonela Lasso"; font-size: 22px; font-weight: 700; color: T.text; }
+                                Text { text: "Version " + root.version + " · sonela.app/lasso"; font-size: 13px; color: T.muted; }
+                            }
+                        }
+                        Card {
+                            title: "Help";
+                            Note { text: "Take a screenshot: click the tray icon (or your hotkey), drag a box, draw, then Enter. Esc closes at once - the tray menu's \"Restore last capture\" brings it back. Press ? on the frozen screen for every key."; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Btn { small: true; text: "Open the log folder"; clicked => { root.act("open-log"); } }
+                                Btn { small: true; text: "Capture now"; primary: true; clicked => { root.act("capture"); } }
+                            }
+                        }
+                        Card {
+                            title: "Updates";
+                            Row {
+                                label: root.upd-available ? "Lasso " + root.upd-version + " is out" : "Lasso updates";
+                                sub: root.upd-status;
+                                if root.upd-can-check: Btn {
+                                    y: (parent.height - self.height) / 2;
+                                    small: true;
+                                    text: "Check for updates";
+                                    enabled: !root.upd-busy;
+                                    clicked => { root.act("upd-check"); }
+                                }
+                                if root.upd-available: Btn {
+                                    y: (parent.height - self.height) / 2;
+                                    small: true;
+                                    primary: true;
+                                    text: root.upd-button;
+                                    enabled: !root.upd-busy;
+                                    clicked => { root.act("upd-install"); }
+                                }
+                            }
+                            if root.upd-available && root.upd-notes != "": Note { text: "What's new: " + root.upd-notes; }
+                            Note { text: "Lasso checks sonela.app every few hours. The check sends only Lasso's version and your system type (Windows or Linux) - no ID, nothing about you."; }
+                        }
+                        Card {
+                            title: "Privacy";
+                            Row {
+                                label: "Count me in the daily numbers";
+                                sub: "once a day Lasso tells sonela.app it's in use: its version and Windows or Linux - no ID, nothing else";
+                                Switch { y: (parent.height - self.height) / 2; on: root.usage-ping; toggled(v) => { root.set("usage_ping", v ? "1" : "0"); } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Edges {
+        win-act(a) => { root.win-act(a); }
+    }
+}

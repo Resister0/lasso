@@ -1,0 +1,10 @@
+Lasso - screenshots with every editing tool on the frozen screen
+https://sonela.app/lasso
+
+WHAT IT INSTALLS
+Lasso installs for you only (no administrator rights) into your user folder (AppData\Local\Lasso), with a Start menu entry and an uninstaller in Windows Settings > Apps. Your settings and library live in your user profile; pictures are saved in Pictures\Lasso.
+
+PRIVACY
+Lasso keeps your screenshots on this PC. It sends nothing anywhere unless you use a share-link feature, and then only the picture you chose to share.
+
+Free software under the GNU GPL v3 or later (see LICENSE). Source: https://github.com/Resister0/lasso

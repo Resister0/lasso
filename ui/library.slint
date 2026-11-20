@@ -1,0 +1,339 @@
+// The mini library (the user, 13 Nov 2026: "would be cool too"): every capture with its shapes still editable +
+// the pictures in the save folder. Double-click / Edit = back on the frozen screen with every tool.
+
+import { T, Btn, IconBtn, Pill, Seg } from "theme.slint";
+import { TitleBar, Edges } from "winframe.slint";
+
+export struct LibItem {
+    key: string,
+    lib: bool,
+    thumb: image,
+    time: string,
+    info: string,
+    shared: bool,
+    saved: bool,
+    sel: bool,
+    // "7 days" / "Never" - shared captures only
+    expiry: string,
+}
+
+export struct LibGroup {
+    title: string,
+    items: [LibItem],
+}
+
+component Tile inherits Rectangle {
+    in property <LibItem> it;
+    callback act(string);
+    callback pick(bool);
+    // the action bar stays while the mouse is on one of its buttons (they take the hover from the tile)
+    property <bool> icon-hov;
+    property <bool> hov: ta.has-hover || bar-ta.has-hover || icon-hov;
+    border-radius: 8px;
+    background: hov ? T.hover : T.panel;
+    border-width: it.sel ? 2px : 1px;
+    border-color: it.sel ? T.accent : hov ? T.accent.with-alpha(0.4) : T.line;
+    clip: true;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.pick(e.modifiers.control || e.modifiers.shift);
+            }
+        }
+        double-clicked => { root.act("edit"); }
+    }
+    Rectangle {
+        x: 6px;
+        y: 6px;
+        width: parent.width - 12px;
+        height: parent.height - 40px;
+        border-radius: 5px;
+        background: #0c0c0f;
+        clip: true;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.it.thumb;
+            image-fit: contain;
+        }
+    }
+    HorizontalLayout {
+        y: parent.height - 32px;
+        height: 28px;
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 6px;
+        Text { text: root.it.time; color: T.text; font-size: 12.5px; font-weight: 600; vertical-alignment: center; }
+        Text { text: root.it.info; color: T.muted; font-size: 11.5px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+        if root.it.lib: Text { text: "✎"; color: T.accent2; font-size: 12px; vertical-alignment: center; }
+        if root.it.shared: Text { text: "🔗"; color: T.accent2; font-size: 11px; vertical-alignment: center; }
+    }
+    // a shared capture: its link's actions along the bottom of the picture
+    if root.it.shared: Rectangle {
+        x: 10px;
+        y: parent.height - 40px - 30px;
+        width: parent.width - 20px;
+        height: 26px;
+        visible: root.hov;
+        HorizontalLayout {
+            spacing: 3px;
+            alignment: start;
+            for b in [{ id: "copy-link", t: "Copy link" }, { id: "expiry", t: "" }, { id: "stop-share", t: "Stop sharing" }]: Rectangle {
+                width: bt.preferred-width + 14px;
+                border-radius: 6px;
+                background: bta.has-hover ? T.accent : #000000c0;
+                bt := Text { text: b.id == "expiry" ? root.it.expiry : b.t; color: white; font-size: 11.5px; horizontal-alignment: center; vertical-alignment: center; }
+                bta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.act(b.id); }
+                    changed has-hover => { root.icon-hov = self.has-hover; }
+                }
+            }
+        }
+    }
+    // the actions on hover
+    Rectangle {
+        x: 10px;
+        y: 10px;
+        width: parent.width - 20px;
+        height: 26px;
+        visible: root.hov;
+        bar-ta := TouchArea { }
+        HorizontalLayout {
+            spacing: 3px;
+            alignment: end;
+            if root.it.lib: Rectangle {
+                width: 26px;
+                border-radius: 6px;
+                background: ota.has-hover ? T.accent : #000000b0;
+                Path {
+                    width: 15px;
+                    height: 15px;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    stroke-width: 1.8px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    fill: transparent;
+                    stroke: white;
+                    commands: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5";
+                }
+                ota := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.act("original"); }
+                    changed has-hover => { root.icon-hov = self.has-hover; }
+                }
+            }
+            for a in [
+                { id: "edit", icon: "M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3zM13.5 6.5l3 3", tip: "Edit" },
+                { id: "copy", icon: "M10 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3", tip: "Copy" },
+                { id: "saveas", icon: "M12 3v12M7 10l5 5l5-5M4 21h16", tip: "Save as" },
+                { id: "pin", icon: "M12 17v5M5 9l7-7l7 7M8 9v4l-3 4h14l-3-4V9", tip: "Pin" },
+                { id: "folder", icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", tip: "Show in folder" },
+                { id: "delete", icon: "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3", tip: "Delete (to the trash)" },
+            ]: Rectangle {
+                width: 26px;
+                border-radius: 6px;
+                background: ata.has-hover ? T.accent : #000000b0;
+                Path {
+                    width: 15px;
+                    height: 15px;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    stroke-width: 1.8px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    fill: transparent;
+                    stroke: white;
+                    commands: a.icon;
+                }
+                ata := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.act(a.id); }
+                    changed has-hover => { root.icon-hov = self.has-hover; }
+                }
+            }
+        }
+    }
+}
+
+export component LibraryWindow inherits Window {
+    title: "Lasso Library";
+    icon: @image-url("../assets/icons/lasso-64.png");
+    no-frame: true;
+    preferred-width: 980px;
+    preferred-height: 660px;
+    min-width: 520px;
+    min-height: 380px;
+    background: T.bg;
+    default-font-size: 14px;
+
+    in property <bool> win-max;
+    in property <[LibGroup]> groups;
+    in property <string> count;
+    in property <int> selected;
+    in property <string> toast;
+    in property <bool> empty;
+    in property <bool> drag-over;
+    in property <int> group-by;
+    in property <bool> searching;
+    property <length> tw: 240px;
+    property <length> th: 168px;
+    property <length> gap: 12px;
+    property <int> cols: max(1, floor((root.width - 40px + root.gap) / (root.tw + root.gap)));
+
+    callback win-act(string);
+    callback act(string, string);
+    callback pick(string, bool);
+    callback bulk(string);
+    callback search(string);
+    callback group(int);
+
+    VerticalLayout {
+        TitleBar {
+            title: "Lasso";
+            sub: "Library · " + root.count;
+            win-max: root.win-max;
+            win-act(a) => { root.win-act(a); }
+            Btn { y: (parent.height - self.height) / 2; small: true; text: "Open a picture"; clicked => { root.bulk("open"); } }
+            Btn { y: (parent.height - self.height) / 2; small: true; primary: true; text: "Capture"; clicked => { root.bulk("capture"); } }
+            Rectangle { width: 6px; }
+        }
+        // search (the text in the pictures, app, file name) + group by day / app
+        Rectangle {
+            height: 48px;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 10px;
+                spacing: 10px;
+                Rectangle {
+                    height: 32px;
+                    max-width: 420px;
+                    horizontal-stretch: 1;
+                    border-radius: T.r-btn;
+                    background: T.panel;
+                    border-width: 1px;
+                    border-color: q.has-focus ? T.accent : T.line;
+                    Path {
+                        x: 10px;
+                        width: 15px;
+                        height: 15px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        stroke: T.muted;
+                        stroke-width: 1.8px;
+                        stroke-line-cap: round;
+                        fill: transparent;
+                        commands: "M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14z M20 20l-4-4";
+                    }
+                    q := TextInput {
+                        x: 32px;
+                        width: parent.width - 42px;
+                        vertical-alignment: center;
+                        color: T.text;
+                        font-size: 13px;
+                        single-line: true;
+                        edited => { root.search(self.text); }
+                    }
+                    if q.text == "": Text {
+                        x: 32px;
+                        text: "Search the text in your pictures, an app or a file name";
+                        color: T.dim;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle { horizontal-stretch: 0.0001; }
+                Text { text: "Group by"; color: T.muted; font-size: 12.5px; vertical-alignment: center; }
+                Seg {
+                    compact: true;
+                    opts: [{ label: "Day", value: 0 }, { label: "App or game", value: 1 }];
+                    value: root.group-by;
+                    picked(v) => { root.group(v); }
+                }
+            }
+        }
+        Flickable {
+            content-height: gl.preferred-height;
+            gl := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                alignment: start;
+                if root.empty: Text {
+                    text: root.searching ? "Nothing found." : "Nothing here yet - your captures and the pictures in your save folder show up here.";
+                    color: T.muted;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                }
+                for g in root.groups: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: g.title; color: T.muted; font-size: 13px; font-weight: 600; }
+                    Rectangle {
+                        height: ceil(g.items.length / root.cols) * (root.th + root.gap);
+                        for it[i] in g.items: Tile {
+                            x: (i - floor(i / root.cols) * root.cols) * (root.tw + root.gap);
+                            y: floor(i / root.cols) * (root.th + root.gap);
+                            width: root.tw;
+                            height: root.th;
+                            it: it;
+                            act(a) => { root.act(a, it.key); }
+                            pick(add) => { root.pick(it.key, add); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if root.drag-over: Rectangle {
+        x: 12px;
+        y: 48px;
+        width: root.width - 24px;
+        height: root.height - 60px;
+        border-radius: 12px;
+        border-width: 2px;
+        border-color: T.accent;
+        background: T.accent.with-alpha(0.08);
+        Text { text: "Drop pictures to add them to the library"; color: T.accent2; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    // multi-select actions float at the bottom (an inserted bar would move the tiles between two clicks)
+    if root.selected > 0: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 18px;
+        width: sbl.preferred-width;
+        height: 48px;
+        border-radius: 12px;
+        background: T.panel;
+        border-width: 1px;
+        border-color: T.accent.with-alpha(0.5);
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000099;
+        sbl := HorizontalLayout {
+            padding-left: 18px;
+            padding-right: 8px;
+            spacing: 8px;
+            Text { text: root.selected + " selected"; color: T.text; font-size: 13.5px; font-weight: 600; vertical-alignment: center; }
+            Rectangle { width: 10px; }
+            Btn { y: (parent.height - self.height) / 2; small: true; text: "Copy"; clicked => { root.bulk("copy"); } }
+            Btn { y: (parent.height - self.height) / 2; small: true; text: "Delete"; danger: true; clicked => { root.bulk("delete"); } }
+            Btn { y: (parent.height - self.height) / 2; small: true; text: "Clear"; clicked => { root.bulk("clear"); } }
+        }
+    }
+    if root.toast != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 24px;
+        width: tt.preferred-width + 28px;
+        height: 36px;
+        border-radius: 10px;
+        background: T.panel2;
+        border-width: 1px;
+        border-color: T.line;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: #00000088;
+        tt := Text { text: root.toast; color: T.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    Edges {
+        win-act(a) => { root.win-act(a); }
+    }
+}

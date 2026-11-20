@@ -1,0 +1,116 @@
+[package]
+name = "lasso"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Resister0"]
+description = "Sonela Lasso - screenshots with every editing tool right on the frozen screen"
+
+[[bin]]
+name = "lasso"
+path = "src/main.rs"
+
+[dependencies]
+# Same Slint as Aimdot / Echo. Two renderers on purpose:
+# - software: the frozen screen + popups on KDE / wlroots run on Lasso's own layer-shell surfaces (src/wl/),
+#   drawn by Slint's software renderer (no GPU context to set up = the freeze shows fast, idle memory stays small);
+# - winit + femtovg: the Settings / Library windows (own processes) and the overlay on Windows / GNOME.
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "software-renderer-path",
+    "software-renderer-systemfonts",
+    "unstable-winit-030",
+] }
+# Drawing the shapes onto the picture (same engine for the screen and the saved file = what you see is what you get)
+tiny-skia = "0.11"
+# Text shapes (embedded Noto Sans, OFL)
+ab_glyph = "0.2"
+png = "0.18"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Share links (src/share/): the same HTTP stack as Echo (reqwest blocking + rustls/ring); only used when share_on=1
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Auto-update (src/update.rs): minisign check of a download with Lasso's own updater key (same crate as Aimdot; base64 = the one reqwest already uses)
+minisign-verify = "0.2"
+base64 = "0.23"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+# D-Bus: KWin ScreenShot2, KWin scripting (window list), GlobalShortcuts portal, tray (StatusNotifierItem),
+# file chooser portal. Blocking libdbus like Aimdot / Echo - no tokio / zbus.
+dbus = { version = "0.9", default-features = false }
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+xkbcommon = { version = "0.9", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+arboard = { version = "3.7", default-features = false, features = ["image-data"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Com",
+    "Win32_Storage_FileSystem",
+    "Win32_Networking_WinSock",
+    "Win32_System_Registry",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Ole",
+    "Win32_Security",
+] }
+# COM / WinRT for the fast freeze (src/win/dxgi.rs): DXGI Desktop Duplication, Windows.Graphics.Capture, HDR white
+# level. Same version as Echo's recorder (its gpucap.rs is where this code comes from).
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Devices_Display",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+] }
+
+[build-dependencies]
+slint-build = "1.18"
+# Windows exe icon + version info + manifest (build.rs) - only used for Windows builds, like Echo
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 8
+panic = "abort"
+strip = true
+
+# The picture work (blur, PNG) is slow unoptimised; keep debug builds usable
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev]
+opt-level = 1
