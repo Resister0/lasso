@@ -408,9 +408,16 @@ export component Overlay inherits Window {
     // --- mode bar (top) ------------------------------------------------------------------------------------
     modes := Rectangle {
         property <bool> hov: mb-ta.has-hover;
-        visible: !root.bars-hidden;
+        // out of the box's way (the user, 21 Nov 2026: "the top bar doesn't move when you crop over it"): at the top
+        // unless the box reaches up under it, then at the bottom; hidden when the box covers both
+        property <length> top-y: 22px;
+        property <length> bottom-y: root.height - self.height - 22px;
+        property <bool> over-x: root.has-box && root.bx < self.x + self.width && root.bx + root.bw > self.x;
+        property <bool> hits-top: self.over-x && root.by < self.top-y + self.height + 8px;
+        property <bool> hits-bottom: self.over-x && root.by + root.bh > self.bottom-y - 8px;
+        visible: !root.bars-hidden && !(self.hits-top && self.hits-bottom);
         x: (root.width - self.width) / 2;
-        y: 22px;
+        y: self.hits-top ? self.bottom-y : self.top-y;
         width: mhl.preferred-width;
         height: 42px;
         border-radius: 10px;
