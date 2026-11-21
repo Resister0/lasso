@@ -2418,8 +2418,12 @@ mod tests {
         let a = OutInfo { key: 1, name: "A".into(), x: 0, y: 0, w: 1920, h: 1080, pw: 1920, ph: 1080 };
         let b = OutInfo { key: 2, name: "B".into(), x: 1920, y: 0, w: 2048, h: 1152, pw: 2560, ph: 1440 };
         let out = stitch(&[a, b], vec![(1, pic(1920, 1080, 10)), (2, pic(2560, 1440, 200))]);
-        // the biggest scale for everything: (1920 + 2048) * 1.25 wide, 1152 * 1.25 high
+        // Linux: the biggest scale for everything: (1920 + 2048) * 1.25 wide, 1152 * 1.25 high
+        #[cfg(not(windows))]
         assert_eq!((out.w, out.h), (4960, 1440));
+        // Windows: physical places and sizes, no scaling (win::physical_layout): 1920 + 2560 wide
+        #[cfg(windows)]
+        assert_eq!((out.w, out.h), (4480, 1440));
         assert_eq!(out.at(100, 100)[0], 10);
         assert_eq!(out.at(4000, 100)[0], 200);
         // below the smaller left monitor: a transparent gap, no black bar

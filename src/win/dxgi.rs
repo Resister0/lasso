@@ -453,7 +453,10 @@ fn tonemap(src: &[u8], pitch: usize, w: usize, h: usize, scale: f32, out: &mut [
     for (i, c) in all.iter().enumerate() {
         acc += c;
         if acc as f64 >= total as f64 * 0.999 {
-            peak = (i + 1) as f32 * BIN_MAX / BINS as f32;
+            // the bin's lower edge: SDR white (exactly 1.0) is the start of its bin, so a screen with nothing
+            // brighter stays exact (the upper edge, 1.03, switched the curve on and white came out 252 - found by
+            // the first Windows test run, 21 Nov 2026)
+            peak = i as f32 * BIN_MAX / BINS as f32;
             break;
         }
     }
