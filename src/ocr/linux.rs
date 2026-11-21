@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn tsv_fixture() {
-        let ws = parse_tsv(include_str!("../../tests/ocr/sample.tsv"));
+        let ws = parse_tsv(include_str!("sample.tsv"));
         assert_eq!(ws.len(), 9);
         assert_eq!(ws[0].text, "|");
         assert_eq!(ws[1].r, R::new(40.0, 20.0, 88.0, 22.0));

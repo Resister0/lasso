@@ -500,6 +500,15 @@ impl Editor {
                 }
             }
         }
+        // a drag that starts outside the box = a new box (the user, 21 Nov 2026: "need to be able to select an area when
+        // an area's already been selected"); the shapes stay where they are on the picture, Ctrl+Z brings the old box back
+        if !b.contains(p) && !matches!(self.tool, Tool::Crop | Tool::Picker) {
+            self.stop_typing();
+            self.sel.clear();
+            self.checkpoint();
+            self.drag = Some(Drag::NewBox { start: p, moved: false });
+            return fx;
+        }
         let st = self.style();
         match self.tool {
             Tool::Crop => {
@@ -711,6 +720,19 @@ impl Editor {
         let Some(drag) = self.drag.take() else { return fx };
         match drag {
             Drag::NewBox { moved, .. } => {
+                // a new box drawn while editing (started outside the old one): a click or a tiny drag keeps the old box
+                if self.phase == Phase::Edit && self.tool != Tool::Crop {
+                    let tiny = self.boxr.map(|b| b.w < 2.0 || b.h < 2.0).unwrap_or(true);
+                    if !moved || tiny {
+                        if let Some(s) = self.drop_checkpoint() {
+                            self.boxr = s.boxr;
+                        }
+                    } else if let Some(b) = self.boxr {
+                        self.take_box(b);
+                    }
+                    self.changed();
+                    return fx;
+                }
                 if self.tool == Tool::Crop && self.phase == Phase::Edit {
                     if !moved {
                         // a click with the crop tool: keep the old box
@@ -1518,6 +1540,27 @@ mod tests {
         e.pointer_down(300.0, 250.0, 1);
         e.pointer_up(300.0, 250.0);
         assert_eq!(e.box_ir(), Some(IR { x: 0, y: 0, w: 400, h: 300 }));
+    }
+
+    #[test]
+    fn drag_outside_the_box_picks_a_new_one() {
+        // the user, 21 Nov 2026: a new area while one is already picked
+        let mut e = ed();
+        pick(&mut e);
+        let old = e.box_ir();
+        // a click outside keeps the box
+        e.pointer_down(380.0, 280.0, 1);
+        e.pointer_up(380.0, 280.0);
+        assert_eq!(e.box_ir(), old);
+        // a drag outside = the new box, still editing
+        e.pointer_down(300.0, 220.0, 1);
+        e.pointer_move(340.0, 250.0);
+        e.pointer_move(380.0, 290.0);
+        e.pointer_up(380.0, 290.0);
+        assert_eq!((e.phase, e.box_ir()), (Phase::Edit, Some(IR { x: 300, y: 220, w: 80, h: 70 })));
+        // undo brings the old box back
+        e.undo();
+        assert_eq!(e.box_ir(), old);
     }
 
     #[test]

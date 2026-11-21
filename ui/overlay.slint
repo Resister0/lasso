@@ -576,8 +576,9 @@ export component Overlay inherits Window {
             Rectangle { width: 1px; Rectangle { y: 11px; height: parent.height - 22px; background: B.line; } }
             HorizontalLayout {
                 spacing: 2px;
-                BarBtn { icon: I.undo; kbd-plain: "Ctrl Z"; dim: !root.can-undo; clicked => { root.cmd("undo"); } }
-                BarBtn { icon: I.redo; kbd-plain: "Ctrl ⇧ Z"; dim: !root.can-redo; clicked => { root.cmd("redo"); } }
+                // centred in the bar like everything else (they sat at its top - the user, 21 Nov 2026)
+                BarBtn { y: (parent.height - self.height) / 2; icon: I.undo; kbd-plain: "Ctrl Z"; dim: !root.can-undo; clicked => { root.cmd("undo"); } }
+                BarBtn { y: (parent.height - self.height) / 2; icon: I.redo; kbd-plain: "Ctrl ⇧ Z"; dim: !root.can-redo; clicked => { root.cmd("redo"); } }
             }
         }
     }
