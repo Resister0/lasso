@@ -75,6 +75,50 @@ fn check_url_for(os: &str, arch: &str, version: &str) -> String {
     format!("{UPDATE_BASE}/{os}/{arch}/{version}")
 }
 
+/// + `?ch=beta|dev` on those update channels (stable = no parameter = the old request)
+fn with_channel(url: String, channel: &str) -> String {
+    if channel == "stable" {
+        url
+    } else {
+        format!("{url}?ch={channel}")
+    }
+}
+
+// ----- update channels (21 Nov 2026, Echo's / Aimdot's method): Settings > About > Updates > Update channel -----
+// stable = the normal releases; beta = new versions a little earlier (sonela.app offers the newest of stable + beta);
+// dev = testers, needs the code from the developer (header x-sonela-code; a wrong code = stable). Kept in channel.ini
+// next to config.ini: `channel=<stable|beta|dev>`, `code=<dev code>`. No file = stable.
+
+fn channel_path() -> PathBuf {
+    crate::paths::config_dir().join("channel.ini")
+}
+
+fn parse_channel(text: &str) -> (String, String) {
+    let get = |k: &str| text.lines().find_map(|l| l.trim().strip_prefix(&format!("{k}="))).unwrap_or("").trim().to_string();
+    let ch = match get("channel").as_str() {
+        "beta" => "beta",
+        "dev" => "dev",
+        _ => "stable",
+    };
+    let code = if ch == "dev" { get("code") } else { String::new() };
+    (ch.to_string(), code)
+}
+
+/// ("stable" | "beta" | "dev", the dev code - "" unless dev)
+pub fn channel() -> (String, String) {
+    parse_channel(&std::fs::read_to_string(channel_path()).unwrap_or_default())
+}
+
+/// Saves the channel. A change forgets the known update (it was the old channel's answer) so the next check decides.
+fn set_channel(ch: &str, code: &str) -> std::io::Result<()> {
+    let (ch, code) = parse_channel(&format!("channel={ch}\ncode={}", code.trim().replace(['\n', '\r'], "")));
+    if channel() != (ch.clone(), code.clone()) {
+        let _ = std::fs::remove_file(state_path());
+    }
+    std::fs::create_dir_all(crate::paths::config_dir())?;
+    std::fs::write(channel_path(), format!("channel={ch}\ncode={code}\n"))
+}
+
 /// a > b for "x.y.z" versions (anything after - or + is ignored)
 fn ver_gt(a: &str, b: &str) -> bool {
     let p = |s: &str| -> Vec<u64> { s.trim().trim_start_matches('v').split(['.', '-', '+']).take(3).map(|x| x.parse().unwrap_or(0)).collect() };
@@ -197,6 +241,11 @@ pub fn tray_label() -> Option<String> {
 /// GET -> (status, body). reqwest blocking + rustls/ring like ping.rs (rustls without a default crypto provider: ring
 /// is installed once). Redirects are followed (GitHub downloads redirect).
 fn http_get(url: &str) -> Result<(u16, Vec<u8>), String> {
+    http(url, &[], None)
+}
+
+/// GET (or POST with a JSON body) with extra headers
+fn http(url: &str, headers: &[(&str, String)], post_json: Option<String>) -> Result<(u16, Vec<u8>), String> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
@@ -206,7 +255,14 @@ fn http_get(url: &str) -> Result<(u16, Vec<u8>), String> {
         .timeout(Duration::from_secs(300))
         .build()
         .map_err(|e| e.to_string())?;
-    let mut r = c.get(url).send().map_err(|e| format!("no connection ({e})"))?;
+    let mut req = match post_json {
+        Some(b) => c.post(url).header("content-type", "application/json").body(b),
+        None => c.get(url),
+    };
+    for (k, v) in headers {
+        req = req.header(*k, v.as_str());
+    }
+    let mut r = req.send().map_err(|e| format!("no connection ({e})"))?;
     let code = r.status().as_u16();
     let mut body = Vec::new();
     std::io::copy(&mut r, &mut body).map_err(|e| format!("download failed ({e})"))?;
@@ -237,7 +293,10 @@ fn parse_answer(code: u16, body: &str, current: &str, now: u64) -> Result<State,
 
 /// One check, written to update.ini (a failure keeps the last known update and notes the error)
 fn check_and_save() -> Result<State, String> {
-    let r = http_get(&check_url_for(os(), arch(), VERSION)).and_then(|(code, body)| parse_answer(code, &String::from_utf8_lossy(&body), VERSION, now()));
+    // dev sends the tester code (sonela.app answers stable for a wrong one)
+    let (ch, dev_code) = channel();
+    let headers = if ch == "dev" { vec![("x-sonela-code", dev_code)] } else { vec![] };
+    let r = http(&with_channel(check_url_for(os(), arch(), VERSION), &ch), &headers, None).and_then(|(code, body)| parse_answer(code, &String::from_utf8_lossy(&body), VERSION, now()));
     let s = match &r {
         Ok(s) => s.clone(),
         Err(e) => State { error: e.clone(), checked: now(), ..read() },
@@ -362,6 +421,8 @@ pub struct View {
     pub busy: bool,
     /// "Check for updates" makes sense (published build, not Flatpak, not a test copy)
     pub can_check: bool,
+    /// update channel: 0 stable, 1 beta, 2 dev
+    pub channel: i32,
 }
 
 pub type Sink = Arc<dyn Fn(View) + Send + Sync>;
@@ -402,7 +463,12 @@ impl Updater {
         } else {
             "Download"
         };
-        View { available, version: s.version.clone(), notes: s.notes.clone(), status, button: button.into(), busy, can_check: checks() }
+        let channel = match channel().0.as_str() {
+            "beta" => 1,
+            "dev" => 2,
+            _ => 0,
+        };
+        View { available, version: s.version.clone(), notes: s.notes.clone(), status, button: button.into(), busy, can_check: checks(), channel }
     }
 
     fn show(&self) {
@@ -436,6 +502,51 @@ impl Updater {
                 _ => u.set_status(""),
             }
             then(&u);
+        });
+    }
+
+    /// Update channel picked: 0 stable, 1 beta (saved at once, then a check); dev goes through `dev_code`
+    pub fn set_channel(self: &Arc<Self>, pick: i32) {
+        let ch = match pick {
+            1 => "beta",
+            0 => "stable",
+            _ => return self.show(),
+        };
+        if let Err(e) = set_channel(ch, "") {
+            return self.set_status(format!("Couldn't save the update channel: {e}"));
+        }
+        log(&format!("update channel: {ch}"));
+        self.check(true, |_| {});
+    }
+
+    /// The dev code typed in: sonela.app checks it, then dev is saved (a wrong code changes nothing). `done` gets
+    /// "" = saved, else what to show under the code box (on the check thread).
+    pub fn dev_code(self: &Arc<Self>, code: String, done: impl FnOnce(String) + Send + 'static) {
+        let code = code.trim().to_string();
+        if code.is_empty() {
+            return done(String::new());
+        }
+        let u = self.clone();
+        std::thread::spawn(move || {
+            let body = serde_json::json!({ "code": code }).to_string();
+            let r = http("https://sonela.app/lasso/channel/check", &[], Some(body)).and_then(|(c, b)| match c {
+                200 => Ok(serde_json::from_slice::<serde_json::Value>(&b).ok().and_then(|j| j["ok"].as_bool()) == Some(true)),
+                429 => Err("too many tries - wait an hour".to_string()),
+                c => Err(format!("the server answered {c}")),
+            });
+            let msg = match r {
+                Ok(true) => match set_channel("dev", &code) {
+                    Ok(()) => {
+                        log("update channel: dev");
+                        u.check(true, |_| {});
+                        String::new()
+                    }
+                    Err(e) => format!("Couldn't save the update channel: {e}"),
+                },
+                Ok(false) => "That code isn't right - ask the developer for it again.".into(),
+                Err(e) => format!("Couldn't check the code: {e}"),
+            };
+            done(msg);
         });
     }
 
@@ -554,6 +665,18 @@ mod tests {
         assert!(!ver_gt("0.1.2", "0.1.3"));
         assert!(ver_gt("v0.2.0", "0.1.3-dev"));
         assert!(!ver_gt("", "0.1.0"));
+    }
+
+    #[test]
+    fn channels() {
+        assert_eq!(parse_channel(""), ("stable".into(), "".into()));
+        assert_eq!(parse_channel("channel=beta\ncode=abc\n"), ("beta".into(), "".into()));
+        assert_eq!(parse_channel("channel=dev\ncode= abc123 \n"), ("dev".into(), "abc123".into()));
+        assert_eq!(parse_channel("channel=nightly\n"), ("stable".into(), "".into()));
+        let u = check_url_for("linux", "x86_64", "0.1.5");
+        assert_eq!(with_channel(u.clone(), "stable"), "https://sonela.app/lasso/update/linux/x86_64/0.1.5");
+        assert_eq!(with_channel(u.clone(), "beta"), "https://sonela.app/lasso/update/linux/x86_64/0.1.5?ch=beta");
+        assert_eq!(with_channel(u, "dev"), "https://sonela.app/lasso/update/linux/x86_64/0.1.5?ch=dev");
     }
 
     #[test]

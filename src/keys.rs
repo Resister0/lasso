@@ -73,6 +73,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("paste", "Paste a picture as a shape", &["Ctrl+V"]),
     ("save", "Save (no dialog)", &["Ctrl+S"]),
     ("save_as", "Save as...", &["Ctrl+Shift+S"]),
+    ("save_copy", "Save as a copy (a new picture in the library, this one stays as it was)", &["Ctrl+Shift+D"]),
     ("link", "Copy share link", &["Ctrl+L"]),
     ("pin", "Pin to the screen", &["Ctrl+T"]),
     ("new_box", "Throw this away, pick a new box", &["Ctrl+N"]),
@@ -104,6 +105,74 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("mode_back", "Area / Window / Screen, backwards", &["Shift+Tab"]),
     ("keys", "Show all keys", &["?", "F1"]),
 ];
+
+/// Every action that can be a button in the bar under the box (Settings > Capture > "Buttons under the box";
+/// 21 Nov 2026: "why not all the functions available in the app addable and removable"). (id, button text).
+/// The id is the editor action, so a button does exactly what its key does.
+pub const BAR_ACTIONS: [(&str, &str); 23] = [
+    ("pin", "Pin"),
+    ("save", "Save"),
+    ("save_as", "Save as"),
+    ("save_copy", "Save as a copy"),
+    ("copy", "Copy"),
+    ("copy_stay", "Copy, keep editing"),
+    ("copy_save", "Copy + save"),
+    ("copy_text", "Copy text"),
+    ("link", "Share link"),
+    ("redact", "Redact"),
+    ("background", "Background"),
+    ("scroll", "Scrolling capture"),
+    ("new_box", "New box"),
+    ("last_box", "Last box"),
+    ("whole_screen", "Whole screen"),
+    ("hide_bars", "Hide bars"),
+    ("undo", "Undo"),
+    ("redo", "Redo"),
+    ("library", "Library"),
+    ("open", "Open a picture"),
+    ("discard", "Throw away"),
+    ("close", "Close"),
+    ("done", "Done"),
+];
+
+/// The bar's buttons in order, from config `bar` ("save,copy,link,done"); unknown ids dropped, no doubles
+pub fn bar_list(cfg_value: &str) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = vec![];
+    for id in cfg_value.split(',').map(str::trim) {
+        if let Some((k, _)) = BAR_ACTIONS.iter().find(|(k, _)| *k == id) {
+            if !v.contains(k) {
+                v.push(k);
+            }
+        }
+    }
+    v
+}
+
+/// "add:pin" / "remove:pin" / "left:pin" / "right:pin" on the list -> the new config value
+pub fn bar_edit(cfg_value: &str, op: &str, id: &str) -> String {
+    let mut v = bar_list(cfg_value);
+    let at = v.iter().position(|k| *k == id);
+    match (op, at) {
+        ("add", None) => {
+            if let Some((k, _)) = BAR_ACTIONS.iter().find(|(k, _)| *k == id) {
+                // before Done when Done is last (Done stays the right-most button)
+                let pos = if v.last() == Some(&"done") { v.len() - 1 } else { v.len() };
+                v.insert(pos, k);
+            }
+        }
+        ("remove", Some(i)) => {
+            v.remove(i);
+        }
+        ("left", Some(i)) if i > 0 => v.swap(i, i - 1),
+        ("right", Some(i)) if i + 1 < v.len() => v.swap(i, i + 1),
+        _ => {}
+    }
+    v.join(",")
+}
+
+pub fn bar_text(id: &str) -> &'static str {
+    BAR_ACTIONS.iter().find(|(k, _)| *k == id).map(|(_, t)| *t).unwrap_or("")
+}
 
 pub fn action_name(id: &str) -> &'static str {
     ACTIONS.iter().find(|a| a.0 == id).map(|a| a.1).unwrap_or("")
@@ -351,6 +420,18 @@ pub fn from_slint(text: &str, ctrl: bool, alt: bool, shift: bool, repeat: bool, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bar_list_and_edits() {
+        use super::{bar_edit, bar_list};
+        assert_eq!(bar_list("save, copy,nope,copy,done"), vec!["save", "copy", "done"]);
+        assert_eq!(bar_edit("save,copy,done", "add", "pin"), "save,copy,pin,done");
+        assert_eq!(bar_edit("save,copy", "add", "pin"), "save,copy,pin");
+        assert_eq!(bar_edit("save,copy,done", "left", "copy"), "copy,save,done");
+        assert_eq!(bar_edit("save,copy,done", "right", "done"), "save,copy,done");
+        assert_eq!(bar_edit("save,copy,done", "remove", "save"), "copy,done");
+        assert_eq!(bar_edit("save,copy,done", "add", "save"), "save,copy,done");
+    }
+
     use super::*;
 
     fn ev(key: &str, ctrl: bool, shift: bool) -> KeyEv {

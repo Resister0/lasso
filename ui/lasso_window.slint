@@ -1,0 +1,80 @@
+// Settings and Library in ONE window (21 Nov 2026: "why does pressing Library and Settings open a whole new menu? why
+// not a slider that simply horizontally slides between the two menus?"), laid out like Aimdot (same day: "I like the
+// layout of Aimdot's menus"): a left rail with the pages, the picked page slides in; each page's state is a global
+// (SS in settings.slint, LL in library.slint).
+
+import { T, Btn, NavBtn, Ic } from "theme.slint";
+import { TitleBar, Edges } from "winframe.slint";
+import { SettingsView, SS } from "settings.slint";
+import { LibraryView, LL } from "library.slint";
+
+export component LassoWindow inherits Window {
+    title: root.view == 0 ? "Lasso Settings" : "Lasso Library";
+    icon: @image-url("../assets/icons/lasso-64.png");
+    no-frame: true;
+    preferred-width: 980px;
+    preferred-height: 660px;
+    min-width: 640px;
+    min-height: 440px;
+    background: T.bg;
+    default-font-size: 14px;
+    forward-focus: sv;
+
+    in property <bool> win-max;
+    // 0 = Settings, 1 = Library
+    in-out property <int> view;
+    callback win-act(string);
+    // where the pages are (0 .. 1), slides after `view`
+    property <float> pos: root.view;
+    animate pos { duration: 260ms; easing: ease-in-out; }
+
+    VerticalLayout {
+        TitleBar {
+            title: "Lasso";
+            sub: root.view == 1 ? "Library · " + LL.count : "Settings";
+            win-max: root.win-max;
+            win-act(a) => { root.win-act(a); }
+            if root.view == 1: Btn { y: (parent.height - self.height) / 2; small: true; text: "Open a picture"; clicked => { LL.bulk("open"); } }
+            if root.view == 1: Btn { y: (parent.height - self.height) / 2; small: true; primary: true; text: "Capture"; clicked => { LL.bulk("capture"); } }
+            Rectangle { width: 6px; }
+        }
+        HorizontalLayout {
+        vertical-stretch: 1;
+        // the rail (Aimdot's): the pages, the version at the bottom
+        Rectangle {
+            width: 180px;
+            background: T.rail;
+            Rectangle { x: parent.width - 1px; width: 1px; background: T.line; }
+            VerticalLayout {
+                padding: 12px;
+                padding-top: 16px;
+                spacing: 4px;
+                NavBtn { label: "Library"; icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"; on: root.view == 1; clicked => { root.view = 1; } }
+                NavBtn { label: "Settings"; icon: Ic.gear; on: root.view == 0; clicked => { root.view = 0; } }
+                Rectangle { }
+                Text { x: 10px; text: "Lasso " + SS.version + " · Sonela"; font-size: 11.5px; color: T.dim; }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+            sv := SettingsView {
+                y: root.pos * parent.height;
+                width: parent.width;
+                height: parent.height;
+                // the page that's slid away is skipped (no drawing, no clicks)
+                visible: root.pos < 0.999;
+            }
+            LibraryView {
+                y: (root.pos - 1) * parent.height;
+                width: parent.width;
+                height: parent.height;
+                visible: root.pos > 0.001;
+            }
+        }
+        }
+    }
+    Edges {
+        win-act(a) => { root.win-act(a); }
+    }
+}

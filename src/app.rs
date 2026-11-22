@@ -41,10 +41,8 @@ struct Out {
     info: OutInfo,
     comp: Overlay,
     win: u32,
-    ed: Option<Editor>,
     layer_ver: u64,
     shown: bool,
-    last_move: (f32, f32),
     /// the picture the darkened copy (bg-dim) was made from (Arc pointer; 0 = none)
     dim_src: usize,
     /// the shape shown as the small live picture while dragged (the layer then holds the other shapes)
@@ -78,6 +76,18 @@ struct ThumbWin {
     dragging: bool,
 }
 
+/// One monitor's part of the editor's picture, in physical px (= its place on the joined screen). A capture over
+/// several monitors is ONE picture with ONE box (the user, 21 Nov 2026: "drag a screenshot between two monitors ...
+/// like Lightshot"); every monitor's frozen screen shows its part of it. A library picture: one part at 0, 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Part {
+    key: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
 /// What one capture is: library id + where it came from (for "replace the saved file")
 #[derive(Clone, Default)]
 struct Sess {
@@ -94,12 +104,28 @@ struct Sess {
     kept: bool,
     /// the app / game the box is on ("Firefox", "Elden Ring"...), for {app} in the file name
     app: String,
+    /// a library picture as it was opened (state.json, thumb.png): "Save as a copy" puts it back in place
+    opened: Option<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
 pub struct App {
     pub cfg: Config,
     outs: Vec<Out>,
+    /// the one editor of the frozen screen(s)
+    ed: Option<Editor>,
+    /// where each monitor showing it sits in its picture
+    parts: Vec<Part>,
+    /// the last pointer move (joined-screen px): the same again is skipped
+    last_move: (f32, f32),
+    /// made once for every monitor: the drawn layer ((picture, version), image), the shapes under a dragged one
+    /// (its index), the darkened picture (picture)
+    layer_img: Option<((usize, u64), Image)>,
+    rest_img: Option<(usize, Image)>,
+    dim_img: Option<(usize, Image)>,
+    /// the monitor the pointer is on (bars + popups without a box, Full screenshot of "this monitor")
     active: usize,
+    /// Esc (Shift+Esc) pressed on the frozen screen, acted on when it comes up
+    esc_down: Option<KeyEv>,
     sess: Option<Sess>,
     showing: bool,
     pins: Vec<PinWin>,
@@ -107,14 +133,23 @@ pub struct App {
     hello: Option<Hello>,
     scrolling: Option<Scrolling>,
     thumb: Option<ThumbWin>,
+    /// the last finished capture (id, saved files, when) for the "Delete the last capture" key
+    last_out: Option<(String, Vec<String>, std::time::Instant)>,
     thumb_timer: slint::Timer,
     toast_timer: slint::Timer,
     delay_timer: slint::Timer,
     me: Weak<RefCell<App>>,
     tools_model: ModelRc<crate::ToolItem>,
+    /// the bar under the box (built on start / settings change only - a model set every frame repaints everything)
+    bar_model: ModelRc<crate::BarItem>,
+    /// the same for a library picture: "Save as a copy" before Done (22 Nov 2026)
+    bar_model_lib: ModelRc<crate::BarItem>,
+    /// the next library picture / file opens on this monitor (its name), not where the mouse last was over Lasso
+    want_out: Option<String>,
     pub on_tray_changed: Option<Box<dyn Fn(Option<i64>)>>,
     keymap: Keymap,
-    children: Vec<std::process::Child>,
+    /// the Settings / Library window processes, with their argument ("--settings-window")
+    children: Vec<(String, std::process::Child)>,
     last_box: Option<(String, R)>,
 }
 
@@ -141,6 +176,24 @@ fn sh(s: impl Into<SharedString>) -> SharedString {
     s.into()
 }
 
+/// A library picture's backdrop: the box's picture small and blurred (shown darkened behind it, like Echo's player)
+fn view_backdrop(base: &Pic, boxr: Option<R>) -> Image {
+    let b = boxr.map(|r| r.ir().clamp(base.w as i32, base.h as i32)).filter(|r| !r.is_empty()).unwrap_or(crate::shapes::IR { x: 0, y: 0, w: base.w as i32, h: base.h as i32 });
+    let small = crate::export::thumbnail(&base.crop(b), 160);
+    let img = image::RgbaImage::from_raw(small.w, small.h, small.px).unwrap_or_default();
+    let blurred = image::imageops::blur(&img, 8.0);
+    let (w, h) = blurred.dimensions();
+    Image::from_rgba8_premultiplied(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(blurred.as_raw(), w, h))
+}
+
+/// "21 Nov 2026, 03:02 · Firefox" for the viewer bar
+fn view_title(s: &Sess) -> String {
+    const M: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let (y, mo, d, h, mi, _) = crate::util::local_from_unix(s.created);
+    let when = format!("{d} {} {y}, {h:02}:{mi:02}", M[(mo.clamp(1, 12) - 1) as usize]);
+    if s.app.is_empty() { when } else { format!("{when} · {}", s.app) }
+}
+
 fn rgba_image(pic: &Pic) -> Image {
     let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pic.px, pic.w, pic.h);
     Image::from_rgba8_premultiplied(buf)
@@ -152,7 +205,14 @@ impl App {
         let app = Rc::new(RefCell::new(App {
             cfg,
             outs: vec![],
+            ed: None,
+            parts: vec![],
+            last_move: (-1.0, -1.0),
+            layer_img: None,
+            rest_img: None,
+            dim_img: None,
             active: 0,
+            esc_down: None,
             sess: None,
             showing: false,
             pins: vec![],
@@ -160,11 +220,15 @@ impl App {
             hello: None,
             scrolling: None,
             thumb: None,
+            last_out: None,
             thumb_timer: slint::Timer::default(),
             toast_timer: slint::Timer::default(),
             delay_timer: slint::Timer::default(),
             me: Weak::new(),
             tools_model: ModelRc::new(VecModel::<crate::ToolItem>::default()),
+            bar_model: ModelRc::new(VecModel::<crate::BarItem>::default()),
+            bar_model_lib: ModelRc::new(VecModel::<crate::BarItem>::default()),
+            want_out: None,
             on_tray_changed: None,
             keymap,
             children: vec![],
@@ -193,6 +257,16 @@ impl App {
         }
         v.push(crate::ToolItem { id: sh("copy_text"), icon: sh(OCR_ICON), key: sh(self.keymap.first("copy_text").replace("Ctrl ", "")), name: sh("Copy text (OCR)"), sep: false });
         self.tools_model = ModelRc::new(VecModel::from(v));
+        let item = |id: &str| crate::BarItem { id: sh(id), text: sh(keys::bar_text(id)), kbd: sh(self.keymap.first(id)) };
+        let ids = keys::bar_list(self.cfg.get("bar"));
+        self.bar_model = ModelRc::new(VecModel::from(ids.iter().map(|id| item(id)).collect::<Vec<_>>()));
+        // a library picture also gets "Save as a copy" (before Done) unless the bar has it already
+        let mut lib = ids.clone();
+        if !lib.contains(&"save_copy") {
+            let at = lib.iter().position(|id| *id == "done").unwrap_or(lib.len());
+            lib.insert(at, "save_copy");
+        }
+        self.bar_model_lib = ModelRc::new(VecModel::from(lib.iter().map(|id| item(id)).collect::<Vec<_>>()));
     }
 
     pub fn reload_config(&mut self) {
@@ -203,6 +277,7 @@ impl App {
         for o in &self.outs {
             crate::set_bars_look(&o.comp.global::<crate::B>(), dark);
             o.comp.set_tools(self.tools_model.clone());
+            o.comp.set_bar_items(self.bar_model.clone());
         }
         crate::log::line("app", "settings reloaded");
     }
@@ -243,7 +318,7 @@ impl App {
                         let (w, h, sc) = (info.pw as u32, info.ph as u32, info.scale());
                         slint::Timer::single_shot(std::time::Duration::from_millis(300), move || crate::wl::prewarm(win, w, h, sc));
                     }
-                    self.outs.push(Out { info, comp, win, ed: None, layer_ver: 0, shown: false, last_move: (-1.0, -1.0), dim_src: 0, live_idx: None, handles });
+                    self.outs.push(Out { info, comp, win, layer_ver: 0, shown: false, dim_src: 0, live_idx: None, handles });
                 }
                 Err(e) => crate::log::line("app", &format!("overlay: {e}")),
             }
@@ -267,6 +342,7 @@ impl App {
         let pal: Vec<slint::Color> = PALETTE.iter().map(|c| slint::Color::from_argb_u8(255, c[0], c[1], c[2])).collect();
         comp.set_palette(ModelRc::new(VecModel::from(pal)));
         comp.set_link_on(true);
+        comp.set_bar_items(self.bar_model.clone());
         let key = info.key;
         let me = self.me.clone();
         let with = move |f: &dyn Fn(&mut App, usize)| {
@@ -364,10 +440,8 @@ impl App {
         // the user, 20 Nov 2026: a drag in the middle of a fresh box must not draw - start with Select (drag = move the
         // box); drawing starts once a tool is picked (button or key). "Start with the last tool" is the opt-in.
         let tool = if self.cfg.on("remember_tool") { Tool::from_id(self.cfg.get("last_tool")).unwrap_or(Tool::Select) } else { Tool::Select };
-        let mut any = false;
-        // a monitor without a new picture must not keep the previous capture's editor
+        // a monitor without a new picture must not show the previous capture
         for o in self.outs.iter_mut() {
-            o.ed = None;
             o.comp.set_bg(Image::default());
             o.comp.set_bg_dim(Image::default());
             o.comp.set_bg_light(Image::default());
@@ -376,55 +450,50 @@ impl App {
             o.dim_src = 0;
             o.comp.set_layer(Image::default());
         }
-        // the picture, a lighter copy (picking) and a darker one (outside the box), made on threads for every monitor at
-        // once: the first frame then only copies pixels (the full-screen dim layer was most of its time) and the UI
-        // thread copies nothing (the user, 20 Nov 2026: "the time from the key to the UI is quite slow")
-        let bufs: Vec<[SharedPixelBuffer<Rgba8Pixel>; 3]> = std::thread::scope(|s| {
-            let hs: Vec<_> = shots
-                .iter()
-                .map(|(_, pic)| {
-                    let a = s.spawn(move || SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pic.px, pic.w, pic.h));
-                    let b = s.spawn(move || scaled_buffer(pic, 166));
-                    let c = s.spawn(move || scaled_buffer(pic, 87));
-                    (a, b, c)
-                })
-                .collect();
-            hs.into_iter().map(|(a, b, c)| [a.join().unwrap(), b.join().unwrap(), c.join().unwrap()]).collect()
-        });
-        for ((key, pic), [plain, light, dark]) in shots.into_iter().zip(bufs) {
-            let Some(i) = self.outs.iter().position(|o| o.info.key == key) else { continue };
-            let pic = Arc::new(pic);
-            let mut ed = Editor::new(pic.clone(), (pic.w as f32, pic.h as f32), keymap.clone());
-            ed.tool = tool;
-            let cfg = &self.cfg;
-            ed.load_styles(|k| cfg.get(k));
-            let o = &mut self.outs[i];
-            o.comp.set_bg(Image::from_rgba8_premultiplied(plain));
-            o.comp.set_bg_light(Image::from_rgba8_premultiplied(light));
-            o.comp.set_light_ready(true);
-            o.comp.set_bg_dim(Image::from_rgba8_premultiplied(dark));
-            o.comp.set_dim_ready(true);
-            o.dim_src = Arc::as_ptr(&pic) as usize;
-            o.layer_ver = 0;
-            o.last_move = (-1.0, -1.0);
-            o.ed = Some(ed);
-            any = true;
-        }
-        if !any {
+        let got: Vec<OutInfo> = infos.iter().filter(|i| shots.iter().any(|s| s.0 == i.key)).cloned().collect();
+        if got.is_empty() {
             crate::notify("Lasso", "No screen to capture");
             return;
         }
+        // every monitor in ONE picture, each at its own pixels (a box can go from one to the other), plus a lighter
+        // copy (picking) and a darker one (outside the box), made in row bands on every core: the first frame then only
+        // copies pixels and the UI thread copies nothing (the user, 20 Nov 2026: "the time from the key to the UI is
+        // quite slow"). One monitor: its own picture, as before.
+        let (parts, w, h) = span_layout(&got);
+        let (pic, [plain, light, dark]) = stitch_parts(&parts, w, h, shots);
+        let pic = Arc::new(pic);
+        let mut ed = Editor::new(pic.clone(), (pic.w as f32, pic.h as f32), keymap);
+        ed.tool = tool;
+        let cfg = &self.cfg;
+        ed.load_styles(|k| cfg.get(k));
+        if parts.len() > 1 {
+            ed.screens = parts.iter().map(|p| R::new(p.x, p.y, p.w, p.h)).collect();
+        }
+        let (plain, light, dark) = (Image::from_rgba8_premultiplied(plain), Image::from_rgba8_premultiplied(light), Image::from_rgba8_premultiplied(dark));
+        let src = Arc::as_ptr(&pic) as usize;
+        for o in self.outs.iter_mut().filter(|o| parts.iter().any(|p| p.key == o.info.key)) {
+            o.comp.set_bg(plain.clone());
+            o.comp.set_bg_light(light.clone());
+            o.comp.set_light_ready(true);
+            o.comp.set_bg_dim(dark.clone());
+            o.comp.set_dim_ready(true);
+            o.dim_src = src;
+            o.layer_ver = 0;
+        }
+        self.set_editor(ed, parts);
+        self.dim_img = Some((src, dark));
         let t_set = t0.elapsed();
         let kept = self.cfg.get("library_keep") == "all";
         self.sess = Some(Sess { id: library::new_id(), created: crate::util::unix_now(), fresh: true, kept, ..Default::default() });
-        for i in 0..self.outs.len() {
-            if self.outs[i].ed.is_some() {
-                if let Some(e) = self.outs[i].ed.as_mut() {
-                    e.set_mode(mode);
-                }
-                self.sync(i);
+        // Wayland doesn't say where the mouse is: Screen mode takes the monitor it was last on
+        let at = self.part_of(self.active.min(self.outs.len().saturating_sub(1))).map(|p| (p.x + p.w / 2.0, p.y + p.h / 2.0));
+        if let Some(e) = self.ed.as_mut() {
+            if let Some(at) = at {
+                e.mouse = at;
             }
+            e.set_mode(mode);
         }
+        self.sync_all();
         let t_sync = t0.elapsed();
         self.show_all();
         crate::sound::play(crate::sound::Snd::Freeze);
@@ -443,15 +512,33 @@ impl App {
             return;
         };
         self.capture(Mode::Area, false);
-        if let Some(i) = self.outs.iter().position(|o| o.info.name == name && o.ed.is_some()) {
-            if let Some(e) = self.outs[i].ed.as_mut() {
-                e.boxr = Some(r);
-                e.phase = Phase::Edit;
-                e.version += 1;
+        if let Some(r) = self.box_from_last(&name, r, true) {
+            if let Some(e) = self.ed.as_mut() {
+                e.set_box(r);
             }
-            self.active = i;
-            self.sync(i);
+            self.sync_all();
         }
+    }
+
+    /// The remembered box (monitor name + box on it, "*" = over several) in this capture's picture; `any` = also when
+    /// that monitor isn't part of it (only one screen)
+    fn box_from_last(&self, name: &str, r: R, any: bool) -> Option<R> {
+        if name == "*" {
+            return (self.parts.len() > 1).then_some(r);
+        }
+        if let Some(p) = self.outs.iter().find(|o| o.info.name == name).and_then(|o| self.parts.iter().find(|p| p.key == o.info.key)) {
+            return Some(r.moved(p.x, p.y));
+        }
+        (any || self.parts.len() == 1).then_some(r)
+    }
+
+    /// The box to remember for Ctrl+Shift+B / --repeat: on its monitor, or "*" when it is over several
+    fn remember_box(&mut self) {
+        let Some(b) = self.ed.as_ref().and_then(|e| e.boxr) else { return };
+        self.last_box = Some(match self.box_part() {
+            Some((i, p)) => (self.outs[i].info.name.clone(), b.moved(-p.x, -p.y)),
+            None => ("*".into(), b),
+        });
     }
 
     fn fetch_windows(&self) {
@@ -467,19 +554,22 @@ impl App {
     }
 
     pub fn set_windows(&mut self, _outs: &[OutInfo], wins: Vec<(R, String)>) {
-        for o in self.outs.iter_mut() {
+        let Some((pw, ph)) = self.ed.as_ref().map(|e| (e.doc.base.w as f32, e.doc.base.h as f32)) else { return };
+        let mut list: Vec<(R, String)> = vec![];
+        for (r, n) in wins.iter().filter(|(_, cls)| !cls.to_lowercase().contains("lasso")) {
+            // through the monitor its middle is on (desktop layout -> that monitor's pixels -> its place in the picture)
+            let c = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let on = self.outs.iter().filter_map(|o| self.parts.iter().find(|p| p.key == o.info.key).map(|p| (o, p)));
+            let Some((o, p)) = on.min_by(|a, b| rect_dist(&logical_rect(&a.0.info), c).total_cmp(&rect_dist(&logical_rect(&b.0.info), c))) else { continue };
             let s = o.info.scale();
-            if let Some(e) = o.ed.as_mut() {
-                let (pw, ph) = (o.info.pw as f32, o.info.ph as f32);
-                let list: Vec<(R, String)> = wins
-                    .iter()
-                    .filter(|(_, cls)| !cls.to_lowercase().contains("lasso"))
-                    .map(|(r, n)| (R::new((r.x - o.info.x as f32) * s, (r.y - o.info.y as f32) * s, r.w * s, r.h * s), n.clone()))
-                    .filter(|(r, _)| r.r() > 0.0 && r.b() > 0.0 && r.x < pw && r.y < ph)
-                    .collect();
-                e.window_names = list.iter().map(|(r, n)| app_name(n, r.w * r.h >= 0.9 * pw * ph)).collect();
-                e.windows = list.into_iter().map(|(r, _)| r).collect();
+            let pr = R::new((r.x - o.info.x as f32) * s + p.x, (r.y - o.info.y as f32) * s + p.y, r.w * s, r.h * s);
+            if pr.r() > 0.0 && pr.b() > 0.0 && pr.x < pw && pr.y < ph {
+                list.push((pr, app_name(n, pr.w * pr.h >= 0.9 * p.w * p.h)));
             }
+        }
+        if let Some(e) = self.ed.as_mut() {
+            e.window_names = list.iter().map(|(_, n)| n.clone()).collect();
+            e.windows = list.into_iter().map(|(r, _)| r).collect();
         }
     }
 
@@ -533,6 +623,7 @@ impl App {
         let id2 = id.clone();
         // a full screenshot is copied + saved = used: in the library unless Settings says nothing goes there
         let keep_it = self.cfg.get("library_keep") != "none";
+        let echo = crate::echo_link::target(&self.cfg);
         std::thread::spawn(move || {
             let enc = crate::export::encode(&p2, &fmt, fits, false);
             let path = crate::export::free_name(&dir, &crate::util::name_from_pattern(&pat, "Lasso"), enc.ext);
@@ -540,6 +631,7 @@ impl App {
             let mut st = st;
             if res.is_ok() {
                 st.saved.push(path.to_string_lossy().to_string());
+                crate::echo_link::mirror(echo, &id2, &path);
             }
             if keep_it {
                 let _ = library::store(&id2, &p2, true, &st, &Default::default(), Some(&p2));
@@ -558,6 +650,7 @@ impl App {
                 })
             });
         });
+        self.last_out = Some((id.clone(), vec![], std::time::Instant::now()));
         if self.cfg.on("thumb_after_full") {
             self.show_thumb(&pic, &id, "Copied", vec![]);
         }
@@ -569,9 +662,10 @@ impl App {
     fn show_all(&mut self) {
         // a fresh start for Ctrl / Shift / Alt: the key-ups of the shortcut that closed it last time never came (D5)
         self.mods(false, false, false);
+        self.esc_down = None;
         self.showing = true;
         for o in self.outs.iter_mut() {
-            if o.ed.is_some() && !o.shown {
+            if self.parts.iter().any(|p| p.key == o.info.key) && !o.shown {
                 crate::show_overlay(&o.comp, &o.info);
                 o.shown = true;
             }
@@ -598,7 +692,11 @@ impl App {
             o.comp.set_layer(Image::default());
             o.comp.set_mag(Image::default());
             o.layer_ver = 0;
+            o.live_idx = None;
         }
+        self.layer_img = None;
+        self.rest_img = None;
+        self.dim_img = None;
         self.showing = false;
         if let Some(f) = &self.on_tray_changed {
             let t = self.sess.as_ref().map(|s| s.created);
@@ -608,7 +706,7 @@ impl App {
     }
 
     pub fn has_restore(&self) -> Option<i64> {
-        if self.outs.iter().any(|o| o.ed.as_ref().map(|e| e.boxr.is_some()).unwrap_or(false)) {
+        if self.ed.as_ref().map(|e| e.boxr.is_some()).unwrap_or(false) {
             return self.sess.as_ref().map(|s| s.created);
         }
         None
@@ -616,22 +714,14 @@ impl App {
 
     /// Esc: close at once, keep everything (memory + library). First time ever: the small popup.
     fn settle_all(&mut self) {
-        for o in self.outs.iter_mut() {
-            if let Some(e) = o.ed.as_mut() {
-                e.settle();
-            }
+        if let Some(e) = self.ed.as_mut() {
+            e.settle();
         }
     }
 
     fn close_keep(&mut self) {
         self.settle_all();
-        if let Some(i) = self.box_out() {
-            if let (Some(e), Some(name)) = (self.outs[i].ed.as_ref(), Some(self.outs[i].info.name.clone())) {
-                if let Some(b) = e.boxr {
-                    self.last_box = Some((name, b));
-                }
-            }
-        }
+        self.remember_box();
         self.remember_tool();
         self.hide_all();
         self.store_async(false);
@@ -645,11 +735,7 @@ impl App {
     fn discard(&mut self) {
         self.remember_tool();
         self.hide_all();
-        for o in self.outs.iter_mut() {
-            o.ed = None;
-            o.comp.set_bg(Image::default());
-            o.comp.set_layer(Image::default());
-        }
+        self.drop_editor();
         if let Some(s) = self.sess.take() {
             if s.fresh {
                 library::cancel(&s.id);
@@ -665,11 +751,7 @@ impl App {
     fn cancel(&mut self) {
         self.remember_tool();
         self.hide_all();
-        for o in self.outs.iter_mut() {
-            o.ed = None;
-            o.comp.set_bg(Image::default());
-            o.comp.set_layer(Image::default());
-        }
+        self.drop_editor();
         // the library entry made by THIS capture goes away again (never an older capture: library edit, restore)
         if let Some(s) = self.sess.take() {
             if s.fresh {
@@ -689,9 +771,7 @@ impl App {
         library::forget(id);
         if !self.showing && self.sess.as_ref().map(|s| s.id == id).unwrap_or(false) {
             self.sess = None;
-            for o in self.outs.iter_mut() {
-                o.ed = None;
-            }
+            self.drop_editor();
             if let Some(f) = &self.on_tray_changed {
                 f(None);
             }
@@ -706,14 +786,14 @@ impl App {
         if self.has_restore().is_some() {
             self.prepare();
             self.settle_all();
-            for i in 0..self.outs.len() {
-                if let Some(e) = self.outs[i].ed.as_ref() {
-                    let img = rgba_image(&e.doc.base);
-                    self.outs[i].comp.set_bg(img);
-                    self.outs[i].layer_ver = 0;
-                    self.sync(i);
+            if let Some(e) = self.ed.as_ref() {
+                let img = rgba_image(&e.doc.base);
+                for o in self.outs.iter_mut().filter(|o| self.parts.iter().any(|p| p.key == o.info.key)) {
+                    o.comp.set_bg(img.clone());
+                    o.layer_ver = 0;
                 }
             }
+            self.sync_all();
             self.show_all();
             return;
         }
@@ -729,7 +809,7 @@ impl App {
 
     /// The last tool + every tool's colour / size / fill / shadow are kept for the next capture (config.ini)
     fn remember_tool(&mut self) {
-        let Some(e) = self.outs.get(self.active).and_then(|o| o.ed.as_ref()) else { return };
+        let Some(e) = self.ed.as_ref() else { return };
         let mut changes: Vec<(String, String)> = e.styles_text().into_iter().filter(|(k, v)| self.cfg.get(k) != v).collect();
         let t = e.tool.id().to_string();
         if self.cfg.get("last_tool") != t && self.cfg.on("remember_tool") {
@@ -755,25 +835,54 @@ impl App {
         }
         // its first write: the library limit is applied after it (with "used ones" that isn't the capture moment)
         let first_write = sess.fresh && sess.stored_out.is_none();
-        let Some(i) = self.box_out().or_else(|| self.outs.iter().position(|o| o.ed.is_some())) else { return };
-        let o = &self.outs[i];
-        let Some(e) = o.ed.as_ref() else { return };
+        let Some(e) = self.ed.as_ref() else { return };
+        // a capture over several monitors: the library keeps the picture of the monitor the box is on (as before
+        // the joined picture; no box yet = the one the mouse is on), the joined one only for a box over several
+        let region = if self.parts.len() > 1 {
+            match e.boxr {
+                Some(_) => self.box_part(),
+                None => self.part_of(self.active).map(|p| (self.active, p)),
+            }
+        } else {
+            None
+        };
+        let (out_i, cut) = match region {
+            Some((i, p)) => (Some(i), Some(p)),
+            None if self.parts.len() > 1 => (None, None),
+            None => (self.outs.iter().position(|o| self.parts.first().map(|p| p.key) == Some(o.info.key)), None),
+        };
         let base = e.doc.base.clone();
         let images = e.doc.images.clone();
+        let mut shapes = e.doc.shapes.clone();
+        let mut boxr = e.boxr;
+        let mut history = e.history();
+        if let Some(p) = cut {
+            shapes.iter_mut().for_each(|s| s.translate(-p.x, -p.y));
+            boxr = boxr.map(|b| b.moved(-p.x, -p.y));
+            for (hb, hs) in history.iter_mut() {
+                hs.iter_mut().for_each(|s| s.translate(-p.x, -p.y));
+                *hb = hb.map(|b| b.moved(-p.x, -p.y));
+            }
+        }
         let st = library::State {
             created: sess.created,
-            boxr: e.boxr,
-            shapes: e.doc.shapes.clone(),
+            boxr,
+            shapes,
             mode: Some(e.mode),
-            output: o.info.name.clone(),
+            output: out_i.map(|i| self.outs[i].info.name.clone()).unwrap_or_default(),
             saved: sess.saved.clone(),
             source: sess.source.clone(),
+            history,
             ..Default::default()
         };
         let thumb = if first { None } else { e.flatten() };
-        let app = if sess.app.is_empty() { self.box_app(i) } else { sess.app.clone() };
+        let app = if sess.app.is_empty() { self.box_app() } else { sess.app.clone() };
         let st = library::State { app, ..st };
-        let out_key = Some(o.info.key);
+        // which picture screen.png holds: that monitor's, or all of them joined (SPAN_ALL)
+        let out_key = Some(match out_i {
+            Some(i) => self.outs[i].info.key,
+            None => SPAN_ALL,
+        });
         // library edits keep their screen.png (u32::MAX); a capture rewrites it when the box is on another monitor
         let base_dirty = base_needs_write(sess.stored_out, out_key);
         if let Some(s) = self.sess.as_mut() {
@@ -784,6 +893,11 @@ impl App {
         let id = sess.id.clone();
         let keep = (self.cfg.num("keep_count").max(1) as usize, self.cfg.num("keep_days"));
         library::queue(&id, move |id| {
+            // only that monitor's part of the joined picture (copied here, off the UI thread)
+            let base = match cut {
+                Some(p) if base_dirty || first => Arc::new(base.crop(R::new(p.x, p.y, p.w, p.h).ir())),
+                _ => base,
+            };
             let t = thumb.as_ref().or(if first { Some(&*base) } else { None });
             if let Err(e) = library::store(id, &base, base_dirty, &st, &images, t) {
                 crate::log::line("library", &format!("store: {e}"));
@@ -799,63 +913,127 @@ impl App {
         });
     }
 
-    fn box_out(&self) -> Option<usize> {
-        if self.outs.get(self.active).and_then(|o| o.ed.as_ref()).map(|e| e.boxr.is_some()).unwrap_or(false) {
-            return Some(self.active);
+    /// A new editor on the frozen screen(s): `parts` = where each monitor showing it sits in its picture
+    fn set_editor(&mut self, ed: Editor, parts: Vec<Part>) {
+        let bar = if ed.lib_view { self.bar_model_lib.clone() } else { self.bar_model.clone() };
+        for o in &self.outs {
+            o.comp.set_bar_items(bar.clone());
         }
-        self.outs.iter().position(|o| o.ed.as_ref().map(|e| e.boxr.is_some()).unwrap_or(false))
+        self.ed = Some(ed);
+        self.parts = parts;
+        self.last_move = (-1.0, -1.0);
+        self.layer_img = None;
+        self.rest_img = None;
+        self.dim_img = None;
+        for o in self.outs.iter_mut() {
+            o.layer_ver = 0;
+            o.live_idx = None;
+        }
+    }
+
+    fn drop_editor(&mut self) {
+        self.ed = None;
+        self.parts.clear();
+        self.layer_img = None;
+        self.rest_img = None;
+        self.dim_img = None;
+        for o in self.outs.iter_mut() {
+            o.comp.set_bg(Image::default());
+            o.comp.set_layer(Image::default());
+        }
+    }
+
+    fn part_of(&self, i: usize) -> Option<Part> {
+        let k = self.outs.get(i)?.info.key;
+        self.parts.iter().find(|p| p.key == k).copied()
+    }
+
+    /// The monitor (index in outs) whose part holds the whole box: None = no box, or a box over several monitors.
+    /// Only one part (one monitor, a library picture): that one.
+    fn box_part(&self) -> Option<(usize, Part)> {
+        let b = self.ed.as_ref()?.boxr?;
+        let found = if self.parts.len() == 1 {
+            self.parts.first().copied()
+        } else {
+            self.parts.iter().find(|p| b.x >= p.x - 0.5 && b.y >= p.y - 0.5 && b.r() <= p.x + p.w + 0.5 && b.b() <= p.y + p.h + 0.5).copied()
+        }?;
+        self.outs.iter().position(|o| o.info.key == found.key).map(|i| (i, found))
+    }
+
+    /// The monitor the bars and popups go on: the one showing the most of the box; without a box the one the
+    /// pointer is on
+    fn ui_out(&self) -> usize {
+        let fallback = self.active.min(self.outs.len().saturating_sub(1));
+        let Some(e) = self.ed.as_ref() else { return fallback };
+        let Some(b) = e.boxr.filter(|_| self.parts.len() > 1) else { return fallback };
+        let r = e.view.rect(&b);
+        let area = |p: &Part| ((r.r().min(p.x + p.w) - r.x.max(p.x)).max(0.0)) * ((r.b().min(p.y + p.h) - r.y.max(p.y)).max(0.0));
+        let mut best = (fallback, self.part_of(fallback).map(|p| area(&p)).unwrap_or(-1.0));
+        for (i, o) in self.outs.iter().enumerate() {
+            if let Some(p) = self.parts.iter().find(|p| p.key == o.info.key) {
+                let a = area(p);
+                if a > best.1 + 0.5 {
+                    best = (i, a);
+                }
+            }
+        }
+        best.0
+    }
+
+    /// The monitor whose part of the joined screen holds this point
+    fn out_at(&self, g: (f32, f32)) -> Option<usize> {
+        self.outs.iter().position(|o| self.parts.iter().any(|p| p.key == o.info.key && g.0 >= p.x && g.1 >= p.y && g.0 < p.x + p.w && g.1 < p.y + p.h))
+    }
+
+    /// A pointer position on monitor `i`'s frozen screen (logical px) -> the joined screen (physical px). Outside
+    /// that monitor (a drag that went on to another one: Wayland / Windows keep sending it to the surface where it
+    /// started): through the desktop layout to the monitor it is over, with that monitor's scale.
+    fn to_global(&self, i: usize, x: f32, y: f32) -> (f32, f32) {
+        let mons: Vec<(OutInfo, Part, f32)> = self.outs.iter().enumerate().filter_map(|(j, o)| self.part_of(j).map(|p| (o.info.clone(), p, self.scale_of(j)))).collect();
+        let from = mons.iter().position(|m| m.0.key == self.outs[i].info.key);
+        match from {
+            Some(f) => joined_point(&mons, f, x, y),
+            None => {
+                let sc = self.scale_of(i);
+                (x * sc, y * sc)
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------------
     // Input
 
     fn pointer(&mut self, i: usize, kind: u8, x: f32, y: f32, button: i32) {
-        let sc = self.scale_of(i);
-        if let Some(e) = self.outs[i].ed.as_mut() {
-            e.ui_scale = sc;
-        }
-        let (px, py) = (x * sc, y * sc);
-        if kind == 1 && self.outs[i].last_move == (px, py) {
+        if self.ed.is_none() {
             return;
         }
-        if kind == 0 && i != self.active {
-            // picking on another monitor: that one becomes the active one, the others drop their box
-            self.active = i;
-            for (k, o) in self.outs.iter_mut().enumerate() {
-                if k != i {
-                    if let Some(e) = o.ed.as_mut() {
-                        if e.phase == Phase::Pick || e.doc.shapes.is_empty() {
-                            e.boxr = None;
-                            e.phase = Phase::Pick;
-                            e.version += 1;
-                        }
-                    }
-                }
-            }
-            for k in 0..self.outs.len() {
-                if k != i && self.outs[k].ed.is_some() {
-                    self.sync(k);
-                }
+        let sc = self.scale_of(i);
+        // one joined screen for every monitor: a drag can go on from one monitor into the next
+        let g = self.to_global(i, x, y);
+        if kind == 1 && self.last_move == g {
+            return;
+        }
+        if kind <= 1 {
+            if let Some(j) = self.out_at(g) {
+                self.active = j;
             }
         }
         if kind == 1 {
-            self.outs[i].last_move = (px, py);
-            if self.active != i && self.outs[self.active].ed.as_ref().map(|e| e.boxr.is_none()).unwrap_or(true) {
-                self.active = i;
-            }
+            self.last_move = g;
         }
-        let Some(ed) = self.outs[i].ed.as_mut() else { return };
+        let Some(ed) = self.ed.as_mut() else { return };
+        ed.ui_scale = sc;
         let fx = match kind {
-            0 => ed.pointer_down(px, py, button as u8),
+            0 => ed.pointer_down(g.0, g.1, button as u8),
             1 => {
-                ed.pointer_move(px, py);
+                ed.pointer_move(g.0, g.1);
                 vec![]
             }
-            2 => ed.pointer_up(px, py),
-            _ => ed.double_click(px, py),
+            2 => ed.pointer_up(g.0, g.1),
+            _ => ed.double_click(g.0, g.1),
         };
         let t = Instant::now();
-        self.sync(i);
+        self.sync_all();
         if kind == 1 && std::env::var_os("LASSO_DEBUG_WL").is_some() {
             crate::log::line("app", &format!("move sync {} us", t.elapsed().as_micros()));
         }
@@ -864,24 +1042,23 @@ impl App {
     }
 
     fn wheel(&mut self, i: usize, x: f32, y: f32, d: f32) {
-        let sc = self.scale_of(i);
-        if let Some(ed) = self.outs[i].ed.as_mut() {
-            ed.wheel(x * sc, y * sc, -d);
+        let g = self.to_global(i, x, y);
+        if let Some(ed) = self.ed.as_mut() {
+            ed.wheel(g.0, g.1, -d);
         }
-        self.sync(i);
+        self.sync_all();
     }
 
-    fn size_set(&mut self, i: usize, v: f32) {
-        if let Some(ed) = self.outs[i].ed.as_mut() {
+    fn size_set(&mut self, _i: usize, v: f32) {
+        if let Some(ed) = self.ed.as_mut() {
             ed.set_size(v);
         }
-        self.sync(i);
+        self.sync_all();
     }
 
     fn command(&mut self, i: usize, c: &str) {
-        self.active = i;
         let fx = {
-            let Some(ed) = self.outs[i].ed.as_mut() else { return };
+            let Some(ed) = self.ed.as_mut() else { return };
             if let Some(m) = c.strip_prefix("mode:") {
                 ed.set_mode(Mode::from_index(m.parse().unwrap_or(0)));
                 vec![]
@@ -889,13 +1066,12 @@ impl App {
                 ed.action(c)
             }
         };
-        self.sync(i);
+        self.sync_all();
         self.run_fx(i, fx);
     }
 
     /// A key from the layer-shell platform (KDE) or the winit FocusScope (Windows / GNOME).
     pub fn key_in(&mut self, ev: KeyEv, pressed: bool) {
-        // pins: Esc closes the focused pin
         let i = self.active.min(self.outs.len().saturating_sub(1));
         if !self.showing {
             return;
@@ -903,13 +1079,16 @@ impl App {
         if ev.key.starts_with("Shift") || ev.key.starts_with("Control") || ev.key.starts_with("Alt") {
             return;
         }
-        let Some(ed) = self.outs.get_mut(i).and_then(|o| o.ed.as_mut()) else { return };
-        if !pressed {
+        // Esc acts on its RELEASE: closing on the press gave the key-up (or a synthetic press) to the app behind -
+        // a full-screen browser left full screen, games react to Esc going up (the user, 21 Nov 2026)
+        let Some(ev) = esc_gate(&mut self.esc_down, ev, pressed) else { return };
+        let Some(ed) = self.ed.as_mut() else { return };
+        if !pressed && !ev.is("Escape") {
             ed.key_up(&ev);
             return;
         }
         let fx = ed.key(&ev);
-        self.sync(i);
+        self.sync_all();
         self.cursor(i);
         self.run_fx(i, fx);
     }
@@ -935,7 +1114,7 @@ impl App {
             return;
         }
         if let Some(i) = self.outs.iter().position(|o| o.win == win) {
-            if self.outs[i].ed.as_ref().map(|e| e.boxr.is_some()).unwrap_or(false) || self.box_out().is_none() {
+            if self.ed.as_ref().map(|e| e.boxr.is_none()).unwrap_or(true) {
                 self.active = i;
             }
         }
@@ -943,10 +1122,8 @@ impl App {
     }
 
     pub fn mods(&mut self, ctrl: bool, shift: bool, alt: bool) {
-        for o in self.outs.iter_mut() {
-            if let Some(e) = o.ed.as_mut() {
-                e.set_mods(ctrl, shift, alt);
-            }
+        if let Some(e) = self.ed.as_mut() {
+            e.set_mods(ctrl, shift, alt);
         }
         crate::MODS.with(|m| m.set((ctrl, shift, alt)));
     }
@@ -966,18 +1143,17 @@ impl App {
 
     pub fn configured(&mut self, win: u32) {
         if let Some(i) = self.outs.iter().position(|o| o.win == win) {
-            if self.outs[i].ed.is_some() {
+            if self.ed.is_some() {
                 self.outs[i].layer_ver = 0;
-                self.sync(i);
+                self.outs[i].live_idx = None;
+                self.sync_all();
             }
         }
     }
 
     pub fn pointer_on(&mut self, win: u32) {
         if let Some(i) = self.outs.iter().position(|o| o.win == win) {
-            if self.box_out().is_none() {
-                self.active = i;
-            }
+            self.active = i;
             self.cursor(i);
         }
     }
@@ -986,10 +1162,12 @@ impl App {
         #[cfg(target_os = "linux")]
         {
             let o = &self.outs[i];
-            let Some(e) = o.ed.as_ref() else { return };
+            let Some(e) = self.ed.as_ref() else { return };
+            // the pointer's monitor shows no part of the box: it looks + acts like picking there (a drag = a new box)
+            let elsewhere = self.parts.len() > 1 && self.out_at(e.view.to_screen(e.mouse)).map(|j| !self.box_here(j)).unwrap_or(false);
             let shape = if o.comp.get_over_ui() {
                 "default"
-            } else if e.phase == Phase::Pick {
+            } else if e.phase == Phase::Pick || elsewhere {
                 if e.mode == Mode::Area {
                     "crosshair"
                 } else {
@@ -1025,6 +1203,17 @@ impl App {
         let _ = i;
     }
 
+    /// Does monitor `i` show a part of the box? (a box only on another monitor: this one looks like picking)
+    #[cfg(target_os = "linux")]
+    fn box_here(&self, i: usize) -> bool {
+        let (Some(e), Some(p)) = (self.ed.as_ref(), self.part_of(i)) else { return false };
+        let Some(b) = e.boxr else { return false };
+        if self.parts.len() < 2 {
+            return true;
+        }
+        touches(&e.view.rect(&b), &R::new(p.x, p.y, p.w, p.h))
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Effects
 
@@ -1039,10 +1228,10 @@ impl App {
                 Fx::Discard => self.discard(),
                 Fx::Close => self.close_keep(),
                 Fx::NewBox => {
-                    if let Some(e) = self.outs[i].ed.as_mut() {
+                    if let Some(e) = self.ed.as_mut() {
                         e.reset_box();
                     }
-                    self.sync(i);
+                    self.sync_all();
                 }
                 Fx::Done => {
                     let what = self.cfg.get("enter_does").to_string();
@@ -1056,6 +1245,7 @@ impl App {
                 Fx::Copy => self.output(i, "copy"),
                 Fx::Save => self.output(i, "save"),
                 Fx::SaveAs => self.output(i, "save_as"),
+                Fx::SaveCopy => self.save_copy(i),
                 Fx::Link => self.output(i, "link"),
                 Fx::Pin => self.output(i, "pin"),
                 Fx::CopySave => self.output(i, "copysave"),
@@ -1066,20 +1256,15 @@ impl App {
                     }
                 }
                 Fx::Scroll => self.start_scroll(i),
-                Fx::LastBox => {
-                    let name = self.outs[i].info.name.clone();
-                    match self.last_box.clone() {
-                        Some((n, r)) if n == name || self.outs.len() == 1 => {
-                            if let Some(e) = self.outs[i].ed.as_mut() {
-                                e.boxr = Some(r);
-                                e.phase = Phase::Edit;
-                                e.version += 1;
-                            }
-                            self.sync(i);
+                Fx::LastBox => match self.last_box.clone().and_then(|(n, r)| self.box_from_last(&n, r, false)) {
+                    Some(r) => {
+                        if let Some(e) = self.ed.as_mut() {
+                            e.set_box(r);
                         }
-                        _ => self.toast(i, "No earlier box on this screen yet"),
+                        self.sync_all();
                     }
-                }
+                    None => self.toast(i, "No earlier box on this screen yet"),
+                },
                 Fx::Background => {
                     let on = {
                         let s = self.sess.get_or_insert_with(Default::default);
@@ -1114,10 +1299,10 @@ impl App {
                     c.set("delay", next.to_string());
                     c.save();
                     self.cfg.set("delay", next.to_string());
-                    let picking = self.outs[i].ed.as_ref().map(|e| e.boxr.is_none()).unwrap_or(false);
+                    let picking = self.ed.as_ref().map(|e| e.boxr.is_none()).unwrap_or(false);
                     if next > 0 && picking {
                         // start over with the timer: the screen is taken again in N seconds
-                        let mode = self.outs[i].ed.as_ref().map(|e| e.mode).unwrap_or(Mode::Area);
+                        let mode = self.ed.as_ref().map(|e| e.mode).unwrap_or(Mode::Area);
                         self.cancel();
                         self.capture(mode, true);
                     } else {
@@ -1130,9 +1315,9 @@ impl App {
                     c.set("pointer", if on { "1" } else { "0" });
                     c.save();
                     self.cfg.set("pointer", if on { "1" } else { "0" });
-                    let picking = self.outs[i].ed.as_ref().map(|e| e.boxr.is_none()).unwrap_or(false);
+                    let picking = self.ed.as_ref().map(|e| e.boxr.is_none()).unwrap_or(false);
                     if picking {
-                        let mode = self.outs[i].ed.as_ref().map(|e| e.mode).unwrap_or(Mode::Area);
+                        let mode = self.ed.as_ref().map(|e| e.mode).unwrap_or(Mode::Area);
                         self.cancel();
                         // one frame later: the frozen screen must be gone from the new picture
                         slint::Timer::single_shot(std::time::Duration::from_millis(60), move || crate::with_app(|a| a.capture(mode, false)));
@@ -1145,8 +1330,8 @@ impl App {
     }
 
     fn finished_pic(&self, i: usize) -> Option<Pic> {
-        let e = self.outs[i].ed.as_ref()?;
-        let p = e.flatten()?;
+        let _ = i;
+        let p = self.ed.as_ref()?.flatten()?;
         if self.sess.as_ref().map(|s| s.background).unwrap_or(false) {
             return Some(crate::export::background(&p, self.cfg.num("background_pad").clamp(8, 400) as u32));
         }
@@ -1162,12 +1347,12 @@ impl App {
     /// copy | save | copysave | save_as | link | pin - all close the frozen screen (the capture stays restorable)
     fn output(&mut self, i: usize, what: &str) {
         let Some(pic) = self.finished_pic(i) else { return };
-        let app = self.box_app(i);
+        let app = self.box_app();
         if let Some(s) = self.sess.as_mut() {
             s.app = app;
         }
         if what == "link" && !self.cfg.on("share_on") {
-            self.toast(i, "Share links aren't switched on yet (they need the Sonela server). Ctrl+C copies the picture.");
+            self.toast(i, "Share links are off (Settings > Library & tools > Share links). Ctrl+C copies the picture.");
             return;
         }
         let pic = Arc::new(pic);
@@ -1181,6 +1366,12 @@ impl App {
         let copy = what == "copy" || what == "copysave" || (self.cfg.on("always_copy") && what != "pin");
         if copy {
             self.copy_pic(&pic);
+            // copied but not saved: the picture still goes to Echo's Screenshots ("Also show in Echo"); a save of
+            // the same capture later replaces it there (echo_link: one file per capture)
+            if !what.contains("save") {
+                let stem = self.file_name(&self.sess.as_ref().map(|s| s.app.clone()).unwrap_or_default());
+                crate::echo_link::put_pic(crate::echo_link::target(&self.cfg), &id, pic.clone(), stem, self.cfg.get("format").to_string(), self.cfg.on("fits_discord"));
+            }
         }
         let mut note = if copy { "Copied".to_string() } else { String::new() };
         match what {
@@ -1197,6 +1388,7 @@ impl App {
                         if let Some(s) = self.sess.as_mut() {
                             s.saved.push(path.to_string_lossy().to_string());
                         }
+                        crate::echo_link::mirror(crate::echo_link::target(&self.cfg), &id, &path);
                         crate::log::line("save", &format!("{} ({} KB)", n, enc.bytes.len() / 1024));
                     }
                     Err(e) => note = format!("Not saved: {e}"),
@@ -1208,6 +1400,8 @@ impl App {
                 let fits = self.cfg.on("fits_discord");
                 let name = self.file_name(&self.sess.as_ref().map(|s| s.app.clone()).unwrap_or_default());
                 let dir = self.cfg.save_dir();
+                let echo = crate::echo_link::target(&self.cfg);
+                let id3 = id.clone();
                 // the dialog starts with the format from the settings ("shot.jpg"); the user can type another kind
                 let start_ext = match fmt.as_str() {
                     "jpg" | "jpeg" => "jpg",
@@ -1221,15 +1415,22 @@ impl App {
                     let enc = crate::export::encode(&p2, &fmt, fits, false);
                     let path = crate::export::save_as_path(&path, enc.ext);
                     let r = crate::export::write_new(&path, &enc.bytes);
+                    if r.is_ok() {
+                        crate::echo_link::mirror(echo, &id3, &path);
+                    }
                     crate::log::line("save", &format!("save as: {:?}", r.as_ref().map(|_| "ok")));
                 });
                 note = "Save as...".into();
             }
             "pin" => {
-                let r = self.outs[i].ed.as_ref().and_then(|e| e.boxr).unwrap_or_default();
-                let sc = self.scale_of(i);
-                let out = self.outs[i].info.key;
-                self.pin(pic.clone(), Some(out), ((r.x / sc) as i32, (r.y / sc) as i32), sc);
+                // on the monitor the box's top-left corner is on, at the box's place there
+                let (b, v) = self.ed.as_ref().map(|e| (e.boxr.unwrap_or_default(), e.view)).unwrap_or_default();
+                let g = v.to_screen((b.x, b.y));
+                let k = self.out_at((g.0 + 0.5, g.1 + 0.5)).unwrap_or_else(|| self.ui_out());
+                let p = self.part_of(k).unwrap_or(Part { key: 0, x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+                let sc = self.scale_of(k);
+                let out = self.outs[k].info.key;
+                self.pin(pic.clone(), Some(out), (((g.0 - p.x) / sc) as i32, ((g.1 - p.y) / sc) as i32), sc);
                 note = String::new();
             }
             "link" => {
@@ -1242,8 +1443,9 @@ impl App {
         if copy || what.contains("save") {
             crate::sound::play(crate::sound::Snd::Done);
         }
+        let saved = self.sess.as_ref().map(|s| s.saved.clone()).unwrap_or_default();
+        self.last_out = Some((id.clone(), saved.clone(), std::time::Instant::now()));
         if !note.is_empty() && self.cfg.on("thumb_after_full") {
-            let saved = self.sess.as_ref().map(|s| s.saved.clone()).unwrap_or_default();
             self.show_thumb(&pic, &id, &note, saved);
         }
     }
@@ -1266,21 +1468,16 @@ impl App {
     /// Closing after an output: kept for restore like Esc, but no first-time popup
     fn close_keep_quiet(&mut self) {
         self.settle_all();
-        if let Some(i) = self.box_out() {
-            if let Some(e) = self.outs[i].ed.as_ref() {
-                if let Some(b) = e.boxr {
-                    self.last_box = Some((self.outs[i].info.name.clone(), b));
-                }
-            }
-        }
+        self.remember_box();
         self.remember_tool();
         self.hide_all();
         self.store_async(false);
     }
 
-    fn ocr(&mut self, i: usize, redact: bool) {
-        let Some(pic) = self.outs[i].ed.as_ref().and_then(|e| e.flatten()) else { return };
-        let off = self.outs[i].ed.as_ref().and_then(|e| e.boxr).map(|b| (b.x, b.y)).unwrap_or((0.0, 0.0));
+    fn ocr(&mut self, _i: usize, redact: bool) {
+        let i = self.ui_out();
+        let Some(pic) = self.ed.as_ref().and_then(|e| e.flatten()) else { return };
+        let off = self.ed.as_ref().and_then(|e| e.boxr).map(|b| (b.x, b.y)).unwrap_or((0.0, 0.0));
         self.outs[i].comp.set_busy(true);
         self.outs[i].comp.set_busy_text(sh(if redact { "Looking for emails, numbers, keys..." } else { "Reading the text..." }));
         let key = self.outs[i].info.key;
@@ -1297,10 +1494,10 @@ impl App {
                                 let hits = crate::ocr::sensitive(&words);
                                 let n = hits.len();
                                 let rs: Vec<R> = hits.into_iter().map(|(r, _)| r.moved(off.0, off.1)).collect();
-                                if let Some(e) = a.outs[i].ed.as_mut() {
+                                if let Some(e) = a.ed.as_mut() {
                                     e.add_blurs(&rs);
                                 }
-                                a.sync(i);
+                                a.sync_all();
                                 a.toast(i, &if n == 0 { "Nothing private found".to_string() } else { format!("Blurred {n} private thing(s) - Ctrl+Z to undo") });
                             } else {
                                 let text = crate::ocr::text(&words);
@@ -1327,10 +1524,10 @@ impl App {
                 let Some(i) = a.outs.iter().position(|o| o.info.key == key) else { return };
                 match res {
                     Ok(p) => {
-                        if let Some(e) = a.outs[i].ed.as_mut() {
+                        if let Some(e) = a.ed.as_mut() {
                             e.paste_image(p);
                         }
-                        a.sync(i);
+                        a.sync_all();
                     }
                     Err(e) => a.toast(i, &e),
                 }
@@ -1338,12 +1535,12 @@ impl App {
         });
     }
 
-    fn toast(&mut self, i: usize, t: &str) {
+    fn toast(&mut self, _i: usize, t: &str) {
         crate::log::line("toast", t);
-        if let Some(o) = self.outs.get(i) {
+        if let Some(o) = self.outs.get(self.ui_out()) {
             o.comp.set_toast(sh(t));
             let w = o.comp.as_weak();
-            let ms = (1400 + t.len() as u64 * 40).min(5000);
+            let ms = (900 + t.len() as u64 * 25).min(3000);
             self.toast_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(ms), move || {
                 if let Some(c) = w.upgrade() {
                     c.set_toast(sh(""));
@@ -1355,56 +1552,110 @@ impl App {
     // ---------------------------------------------------------------------------------------------------------
     // The UI from the editor state
 
-    pub fn sync(&mut self, i: usize) {
-        let sc = self.scale_of(i);
-        if let Some(e) = self.outs[i].ed.as_mut() {
-            e.ui_scale = sc;
+    /// Every monitor showing the capture, from the one editor: each shows its part of the picture; the bars go on
+    /// the monitor with the most of the box. Pictures every monitor needs are made once here.
+    pub fn sync_all(&mut self) {
+        let ui = self.ui_out();
+        let sc = self.scale_of(ui);
+        let Some(e) = self.ed.as_mut() else { return };
+        e.ui_scale = sc;
+        let e = &*e;
+        let src = Arc::as_ptr(&e.doc.base) as usize;
+        if e.boxr.is_some() && self.dim_img.as_ref().map(|d| d.0) != Some(src) {
+            // made once per picture when the first box appears (~ a few ms); moving the box then repaints only the
+            // box, not the four dark strips around it = the whole screen (the user, 20 Nov 2026: "60 Hz")
+            self.dim_img = Some((src, rgba_image(&darkened(&e.doc.base))));
         }
+        // a shape being dragged: the layer holds the OTHER shapes (made once), the dragged one is a small picture of
+        // its own - each move repaints only that (the user, 20 Nov 2026: "dragging the arrow is laggy" = the whole box
+        // was drawn again on every move)
+        let live = e.live_shape().zip(e.box_ir());
+        let mut live_img = None;
+        if let Some((idx, b)) = live {
+            if idx > 0 && self.rest_img.as_ref().map(|r| r.0) != Some(idx) {
+                let rest = crate::shapes::Doc { base: e.doc.base.clone(), shapes: e.doc.shapes[..idx].to_vec(), images: e.doc.images.clone() };
+                self.rest_img = Some((idx, layer_image(&rest, b)));
+            }
+            let s = &e.doc.shapes[idx];
+            let area = s.bbox().inflate(4.0).ir().intersect(&b);
+            if area.w > 0 && area.h > 0 {
+                let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(area.w as u32, area.h as u32);
+                if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(buf.make_mut_bytes(), area.w as u32, area.h as u32) {
+                    crate::shapes::render_one(&e.doc, s, area, &mut pm);
+                }
+                live_img = Some((Image::from_rgba8_premultiplied(buf), area));
+            }
+        } else {
+            self.rest_img = None;
+            if let Some(b) = e.box_ir().filter(|_| !e.doc.shapes.is_empty()) {
+                if self.layer_img.as_ref().map(|l| l.0) != Some((src, e.version)) {
+                    self.layer_img = Some(((src, e.version), layer_image(&e.doc, b)));
+                }
+            }
+        }
+        for i in 0..self.outs.len() {
+            self.sync_out(i, i == ui, live.map(|l| l.0), live_img.as_ref());
+        }
+    }
+
+    fn sync_out(&mut self, i: usize, is_ui: bool, live: Option<usize>, live_img: Option<&(Image, crate::shapes::IR)>) {
+        let Some(p) = self.part_of(i) else { return };
+        let sc = self.scale_of(i);
+        let multi = self.parts.len() > 1;
+        let Some(e) = self.ed.as_ref() else { return };
         let o = &mut self.outs[i];
-        let Some(e) = o.ed.as_ref() else { return };
         let c = &o.comp;
         let lg = |v: f32| v / sc;
-        let v = e.view;
+        // this monitor's view: the editor's (joined screen) moved by where the monitor sits on it
+        let v = View { ox: e.view.ox - p.x, oy: e.view.oy - p.y, s: e.view.s };
+        let vis = R::new(0.0, 0.0, p.w, p.h);
         c.set_vx(lg(v.ox));
         c.set_vy(lg(v.oy));
         c.set_vw(lg(e.doc.base.w as f32 * v.s));
         c.set_vh(lg(e.doc.base.h as f32 * v.s));
         // 100 %: one picture pixel per screen pixel - nearest is the same picture as smooth and much faster to draw
         c.set_pixelated(v.s >= 2.0 || (v.s - 1.0).abs() < 1e-4);
-        let picking = e.phase == Phase::Pick;
+        // the box only on another monitor: this one looks (and acts) like picking - a drag here makes a new box
+        let box_here = e.boxr.filter(|b| (b.w >= 1.0 || e.phase == Phase::Pick) && (!multi || touches(&v.rect(b), &vis)));
+        let picking = e.phase == Phase::Pick || (multi && box_here.is_none());
         c.set_picking(picking);
         c.set_dragging(e.dragging_box());
+        c.set_bars_here(is_ui);
         let m = v.to_screen(e.mouse);
         c.set_mx(lg(m.0));
         c.set_my(lg(m.1));
-        c.set_mouse_in(e.mouse_in);
+        let mouse_in = e.mouse_in && (!multi || (m.0 >= 0.0 && m.1 >= 0.0 && m.0 < p.w && m.1 < p.h));
+        c.set_mouse_in(mouse_in);
         c.set_mode(e.mode.index());
-        match e.boxr {
-            Some(b) if b.w >= 1.0 || picking => {
+        match box_here {
+            Some(b) => {
                 let r = v.rect(&b);
                 c.set_has_box(true);
                 c.set_bx(lg(r.x));
                 c.set_by(lg(r.y));
                 c.set_bw(lg(r.w));
                 c.set_bh(lg(r.h));
+                // the bars go around the part of the box on this monitor
+                let u = clip(&r, &vis);
+                c.set_ubx(lg(u.x));
+                c.set_uby(lg(u.y));
+                c.set_ubw(lg(u.w));
+                c.set_ubh(lg(u.h));
                 // the box in picture px: the bright part drawn over the darkened copy
                 c.set_pbx(b.x.round() as i32);
                 c.set_pby(b.y.round() as i32);
                 c.set_pbw((b.w.round() as i32).max(1));
                 c.set_pbh((b.h.round() as i32).max(1));
-                // made once per capture when the first box appears (~ a few ms); moving the box then repaints only
-                // the box, not the four dark strips around it = the whole screen (the user, 20 Nov 2026: "60 Hz")
-                let src = Arc::as_ptr(&e.doc.base) as usize;
-                if o.dim_src != src {
-                    c.set_bg_dim(rgba_image(&darkened(&e.doc.base)));
+                if let Some((src, img)) = self.dim_img.as_ref().filter(|d| d.0 != o.dim_src) {
+                    c.set_bg_dim(img.clone());
                     c.set_dim_ready(true);
-                    o.dim_src = src;
+                    o.dim_src = *src;
                 }
                 c.set_size_label(sh(format!("{} × {}", b.w.round() as i32, b.h.round() as i32)));
             }
-            _ => c.set_has_box(false),
+            None => c.set_has_box(false),
         }
-        if let Some(w) = e.hover_win.filter(|_| picking && e.boxr.is_none()) {
+        if let Some(w) = e.hover_win.filter(|w| e.phase == Phase::Pick && e.boxr.is_none() && (!multi || touches(&v.rect(w), &vis))) {
             let r = v.rect(&w);
             c.set_win_hover(true);
             c.set_wx(lg(r.x));
@@ -1416,11 +1667,9 @@ impl App {
         }
         let mag_on = self.cfg.on("magnifier");
         c.set_show_mag(mag_on);
-        if picking && mag_on {
-            if e.mouse_in {
-                c.set_mag(magnifier(&e.doc.base, e.mouse));
-                c.set_mag_label(sh(format!("{}, {}", e.mouse.0.round() as i32, e.mouse.1.round() as i32)));
-            }
+        if picking && mag_on && mouse_in {
+            c.set_mag(magnifier(&e.doc.base, e.mouse));
+            c.set_mag_label(sh(format!("{}, {}", e.mouse.0.round() as i32, e.mouse.1.round() as i32)));
         }
         // tool + options
         let t = e.tool;
@@ -1460,9 +1709,15 @@ impl App {
         }));
         c.set_pointer_on(self.cfg.on("pointer"));
         c.set_link_on(true);
-        c.set_keys_sheet(e.keys_sheet);
+        let sheet = e.keys_sheet && is_ui;
+        c.set_keys_sheet(sheet);
         c.set_bars_hidden(e.bars_hidden);
-        if e.keys_sheet && c.get_key_rows().row_count() == 0 {
+        c.set_only_box(e.only_box());
+        if e.lib_view {
+            c.set_zoom_text(sh(format!("{} %", (e.view.s * 100.0).round())));
+            c.set_view_title(sh(self.sess.as_ref().map(view_title).unwrap_or_default()));
+        }
+        if sheet && c.get_key_rows().row_count() == 0 {
             c.set_key_rows(ModelRc::new(VecModel::from(key_sheet(&self.keymap))));
         }
         // selection
@@ -1488,37 +1743,37 @@ impl App {
         } else {
             c.set_caret_show(false);
         }
-        // a shape being dragged: the layer holds the OTHER shapes (made once), the dragged one is a small picture of
-        // its own - each move repaints only that (the user, 20 Nov 2026: "dragging the arrow is laggy" = the whole box
-        // was drawn again on every move)
-        let live = e.live_shape().filter(|_| e.box_ir().is_some());
+        let place_layer = |c: &Overlay, b: crate::shapes::IR| {
+            let r = v.rect(&b.f());
+            c.set_lx(lg(r.x));
+            c.set_ly(lg(r.y));
+            c.set_lw(lg(r.w));
+            c.set_lh(lg(r.h));
+        };
         if let (Some(idx), Some(b)) = (live, e.box_ir()) {
             if o.live_idx != Some(idx) {
                 o.live_idx = Some(idx);
                 o.layer_ver = u64::MAX;
-                if idx == 0 {
-                    c.set_show_layer(false);
-                } else {
-                    let rest = crate::shapes::Doc { base: e.doc.base.clone(), shapes: e.doc.shapes[..idx].to_vec(), images: e.doc.images.clone() };
-                    set_layer_image(c, &rest, b, v, sc);
+                match self.rest_img.as_ref().filter(|_| idx > 0) {
+                    Some((_, img)) => {
+                        c.set_layer(img.clone());
+                        place_layer(c, b);
+                        c.set_show_layer(true);
+                    }
+                    None => c.set_show_layer(false),
                 }
             }
-            let s = &e.doc.shapes[idx];
-            let area = s.bbox().inflate(4.0).ir().intersect(&b);
-            if area.w > 0 && area.h > 0 {
-                let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(area.w as u32, area.h as u32);
-                if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(buf.make_mut_bytes(), area.w as u32, area.h as u32) {
-                    crate::shapes::render_one(&e.doc, s, area, &mut pm);
+            match live_img {
+                Some((img, area)) => {
+                    c.set_live(img.clone());
+                    let r = v.rect(&area.f());
+                    c.set_live_x(lg(r.x));
+                    c.set_live_y(lg(r.y));
+                    c.set_live_w(lg(r.w));
+                    c.set_live_h(lg(r.h));
+                    c.set_show_live(true);
                 }
-                c.set_live(Image::from_rgba8_premultiplied(buf));
-                let r = v.rect(&area.f());
-                c.set_live_x(lg(r.x));
-                c.set_live_y(lg(r.y));
-                c.set_live_w(lg(r.w));
-                c.set_live_h(lg(r.h));
-                c.set_show_live(true);
-            } else {
-                c.set_show_live(false);
+                None => c.set_show_live(false),
             }
             return;
         }
@@ -1527,28 +1782,17 @@ impl App {
             c.set_live(Image::default());
         }
         // the drawn layer: only while there are shapes
-        let need_layer = !e.doc.shapes.is_empty();
-        if !need_layer {
+        if e.doc.shapes.is_empty() {
             c.set_show_layer(false);
         } else if o.layer_ver != e.version {
             o.layer_ver = e.version;
-            if let Some(b) = e.box_ir() {
-                let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(b.w as u32, b.h as u32);
-                {
-                    let bytes = buf.make_mut_bytes();
-                    if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(bytes, b.w as u32, b.h as u32) {
-                        crate::shapes::render(&e.doc, b, &mut pm);
-                    }
+            match (e.box_ir(), self.layer_img.as_ref()) {
+                (Some(b), Some((_, img))) => {
+                    c.set_layer(img.clone());
+                    place_layer(c, b);
+                    c.set_show_layer(true);
                 }
-                c.set_layer(Image::from_rgba8_premultiplied(buf));
-                let r = v.rect(&b.f());
-                c.set_lx(lg(r.x));
-                c.set_ly(lg(r.y));
-                c.set_lw(lg(r.w));
-                c.set_lh(lg(r.h));
-                c.set_show_layer(true);
-            } else {
-                c.set_show_layer(false);
+                _ => c.set_show_layer(false),
             }
         }
     }
@@ -1565,10 +1809,42 @@ impl App {
                 ed.boxr = st.boxr.or(Some(ed.pic_rect()));
                 ed.phase = Phase::Edit;
                 ed.mode = st.mode.unwrap_or(Mode::Area);
-                self.open_editor(ed, Sess { id: id.to_string(), created: st.created, source: st.saved.last().cloned().unwrap_or(st.source), saved: st.saved, background: false, stored_out: Some(u32::MAX), fresh: false, kept: true, app: String::new() });
+                // the picture alone, fitted; Select (a drag draws nothing); last time's undo steps
+                ed.lib_view = true;
+                ed.tool = Tool::Select;
+                ed.view = ed.box_view();
+                ed.set_history(st.history.clone());
+                let d = library::dir(id);
+                let opened = std::fs::read(d.join("state.json")).ok().map(|s| (s, std::fs::read(d.join("thumb.png")).ok()));
+                self.open_editor(ed, Sess { id: id.to_string(), created: st.created, source: st.saved.last().cloned().unwrap_or(st.source), saved: st.saved, background: false, stored_out: Some(u32::MAX), fresh: false, kept: true, app: st.app, opened });
             }
             Err(e) => crate::notify("Lasso", &e),
         }
+    }
+
+    /// "Save as a copy" (the user, 22 Nov 2026: "no button to officially save a version of a picture"): the picture as
+    /// it is now becomes a new library picture and editing goes on in it; the one that was opened goes back to how it
+    /// was when it was opened (edits written to it meanwhile - by Copy, Save... - are undone there)
+    fn save_copy(&mut self, i: usize) {
+        let Some(sess) = self.sess.as_mut() else { return };
+        let (old, opened) = (sess.id.clone(), sess.opened.take());
+        sess.id = library::new_id();
+        sess.created = crate::util::unix_now();
+        sess.saved.clear();
+        sess.stored_out = None;
+        sess.fresh = false;
+        sess.kept = true;
+        if let Some((st, thumb)) = opened {
+            library::queue(&old, move |id| {
+                let d = library::dir(id);
+                let _ = crate::export::write_new(&d.join("state.json"), &st);
+                if let Some(t) = thumb {
+                    let _ = crate::export::write_new(&d.join("thumb.png"), &t);
+                }
+            });
+        }
+        self.store_async(false);
+        self.toast(i, "Saved as a new picture - the one you opened stays as it was");
     }
 
     pub fn open_file(&mut self, path: &str) {
@@ -1579,6 +1855,9 @@ impl App {
                 ed.boxr = Some(ed.pic_rect());
                 ed.phase = Phase::Edit;
                 ed.mode = Mode::Screen;
+                ed.lib_view = true;
+                ed.tool = Tool::Select;
+                ed.view = ed.box_view();
                 let created = crate::util::unix_now();
                 let id = library::new_id();
                 self.open_editor(ed, Sess { id: id.clone(), created, source: path.to_string(), fresh: true, ..Default::default() });
@@ -1591,8 +1870,18 @@ impl App {
         }
     }
 
+    pub fn want_monitor(&mut self, name: &str) {
+        self.want_out = (!name.is_empty()).then(|| name.to_string());
+    }
+
     fn editor_for(&mut self, base: Pic) -> Editor {
         self.prepare();
+        if let Some(name) = self.want_out.take() {
+            match self.outs.iter().position(|o| o.info.name == name) {
+                Some(i) => self.active = i,
+                None => crate::log::line("app", &format!("monitor {name} not found - opened where the mouse last was")),
+            }
+        }
         let o = self.outs.get(self.active).or(self.outs.first());
         let screen = o.map(|o| (o.info.pw as f32, o.info.ph as f32)).unwrap_or((1920.0, 1080.0));
         let mut ed = Editor::new(Arc::new(base), screen, self.keymap.clone());
@@ -1611,17 +1900,15 @@ impl App {
         if self.outs.is_empty() {
             return;
         }
-        for (k, o) in self.outs.iter_mut().enumerate() {
-            if k != i {
-                o.ed = None;
-            }
-        }
         let o = &mut self.outs[i];
         o.comp.set_bg(rgba_image(&ed.doc.base));
-        o.layer_ver = 0;
-        o.ed = Some(ed);
+        if ed.lib_view {
+            o.comp.set_view_bg(view_backdrop(&ed.doc.base, ed.boxr));
+        }
+        let part = Part { key: o.info.key, x: 0.0, y: 0.0, w: o.info.pw as f32, h: o.info.ph as f32 };
+        self.set_editor(ed, vec![part]);
         self.sess = Some(sess);
-        self.sync(i);
+        self.sync_all();
         self.show_all();
     }
 
@@ -1660,7 +1947,7 @@ impl App {
         let _ = p.show();
         self.restore_popup = Some((p, id));
         let me = self.me.clone();
-        self.thumb_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_secs(8), move || {
+        self.thumb_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_secs(5), move || {
             if let Some(a) = me.upgrade() {
                 let mut a = a.borrow_mut();
                 a.seen_hint();
@@ -1727,6 +2014,7 @@ impl App {
         t.set_info(sh(format!("{} × {}", pic.w, pic.h)));
         t.set_note(sh(note));
         t.set_can_drag(crate::can_drag_out());
+        t.set_del_key(sh(if self.cfg.on("hotkeys") { self.cfg.get("hk.delete") } else { "" }));
         let id2 = id.to_string();
         t.on_open(move || {
             let id = id2.clone();
@@ -1783,6 +2071,7 @@ impl App {
     fn thumb_act(&mut self, what: &str) {
         let Some(t) = self.thumb.as_ref() else { return };
         let p = t.pic.clone();
+        let tid = t.id.clone();
         match what {
             "copy" => {
                 self.copy_pic(&p);
@@ -1797,6 +2086,7 @@ impl App {
                     if let Some(t) = self.thumb.as_mut() {
                         t.saved.push(path.to_string_lossy().to_string());
                     }
+                    crate::echo_link::mirror(crate::echo_link::target(&self.cfg), &tid, &path);
                 }
                 self.set_thumb_note(&match r {
                     Ok(()) => format!("Saved · {}", path.file_name().unwrap_or_default().to_string_lossy()),
@@ -1817,19 +2107,56 @@ impl App {
     fn thumb_delete(&mut self) {
         let Some(t) = self.thumb.as_ref() else { return };
         let (id, saved) = (t.id.clone(), t.saved.clone());
-        if crate::share::link_of(&id).is_some() {
-            self.set_thumb_note("Shared - delete it in the Library (stops the link)");
+        self.delete_out(&id, &saved, false);
+    }
+
+    /// The "Delete the last capture" key (21 Nov 2026: "delete a screenshot without moving your mouse to the right"):
+    /// the editor open = throw it away (like Shift+Esc); else the capture in the corner thumbnail, or the last one
+    /// finished in the past 2 minutes. Older ones only in the Library, so a stray key press can't eat an old picture.
+    pub fn delete_last(&mut self) {
+        if self.showing {
+            self.discard();
             return;
         }
-        let r = library::delete_capture(&id, &saved);
-        self.forget(&id);
+        // the key is quiet when it works (21 Nov 2026: the user set it up for quick access - no "Moved to the trash")
+        if let Some(t) = self.thumb.as_ref() {
+            let (id, saved) = (t.id.clone(), t.saved.clone());
+            self.delete_out(&id, &saved, true);
+            return;
+        }
+        match self.last_out.clone() {
+            Some((id, saved, at)) if at.elapsed() < std::time::Duration::from_secs(120) => self.delete_out(&id, &saved, true),
+            // silent: the key may be one a game uses too (21 Nov 2026: "if there's nothing to delete, don't show it")
+            _ => crate::log::line("thumb", "delete key: nothing recent to delete"),
+        }
+    }
+
+    /// `by_key` = the delete key: no "Moved to the trash" popup (errors still say so)
+    fn delete_out(&mut self, id: &str, saved: &[String], by_key: bool) {
+        if crate::share::link_of(id).is_some() {
+            self.set_thumb_note("Shared - delete it in the Library (stops the link)");
+            if self.thumb.is_none() {
+                crate::notify("Lasso", "Shared - delete it in the Library (stops the link)");
+            }
+            return;
+        }
+        let r = library::delete_capture(id, saved);
+        self.forget(id);
         match r {
             Ok(_) => {
-                crate::log::line("thumb", "deleted from the corner thumbnail");
+                crate::log::line("thumb", if by_key { "deleted with the delete key" } else { "deleted from the corner thumbnail" });
+                self.last_out = None;
                 self.hide_popups();
-                crate::notify("Lasso", if saved.is_empty() { "Moved to the trash" } else { "Moved to the trash (with its saved picture)" });
+                if !by_key {
+                    crate::notify("Lasso", if saved.is_empty() { "Moved to the trash" } else { "Moved to the trash (with its saved picture)" });
+                }
             }
-            Err(e) => self.set_thumb_note(&format!("Not deleted: {e}")),
+            Err(e) => {
+                self.set_thumb_note(&format!("Not deleted: {e}"));
+                if self.thumb.is_none() {
+                    crate::notify("Lasso", &format!("Not deleted: {e}"));
+                }
+            }
         }
     }
 
@@ -1904,6 +2231,9 @@ impl App {
 
     /// The full screenshot's background save finished: the thumbnail drags / deletes that file
     pub fn thumb_saved(&mut self, id: &str, path: String) {
+        if let Some(l) = self.last_out.as_mut().filter(|l| l.0 == id) {
+            l.1.push(path.clone());
+        }
         if let Some(t) = self.thumb.as_mut().filter(|t| t.id == id) {
             t.saved.push(path);
         }
@@ -2003,24 +2333,23 @@ impl App {
     /// Quit closes Lasso's own windows too (Settings / Library are their own processes; the user, 20 Nov 2026: "closing
     /// it in the tray doesn't close the Lasso UI"). Both save every change at once, so ending them loses nothing.
     pub fn close_windows(&mut self) {
-        for mut c in self.children.drain(..) {
-            if matches!(c.try_wait(), Ok(None)) {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(c.id() as i32, libc::SIGTERM);
-                }
-                #[cfg(windows)]
-                let _ = c.kill();
-                let _ = c.wait();
-            }
+        for (_, mut c) in self.children.drain(..) {
+            end_child(&mut c);
         }
     }
 
     pub fn open_window(&mut self, arg: &str) {
-        self.children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        self.children.retain_mut(|(_, c)| matches!(c.try_wait(), Ok(None)));
+        // already open (21 Nov 2026: Settings <-> Library buttons): the old one goes and a fresh one opens in front -
+        // a window of another process can't be raised on Wayland, and both save every change at once
+        // Settings and Library are one window now (either argument): one at a time
+        for (_, c) in self.children.iter_mut() {
+            end_child(c);
+        }
+        self.children.clear();
         let exe = std::env::current_exe().unwrap_or_else(|_| "lasso".into());
         match std::process::Command::new(exe).arg(arg).spawn() {
-            Ok(c) => self.children.push(c),
+            Ok(c) => self.children.push((arg.to_string(), c)),
             Err(e) => crate::log::line("app", &format!("{arg}: {e}")),
         }
     }
@@ -2053,16 +2382,12 @@ impl App {
         }
     }
 
-    /// Test hook: the editor of the active monitor
+    /// Test hook: the editor of the frozen screen(s)
     pub fn test_editor(&mut self) -> Option<&mut Editor> {
-        let i = self.active;
-        self.outs.get_mut(i).and_then(|o| o.ed.as_mut())
+        self.ed.as_mut()
     }
     pub fn test_sync(&mut self) {
-        let i = self.active;
-        if i < self.outs.len() {
-            self.sync(i);
-        }
+        self.sync_all();
     }
     pub fn test_fx(&mut self, fx: Vec<Fx>) {
         let i = self.active;
@@ -2086,8 +2411,14 @@ impl App {
         if self.scrolling.is_some() {
             return;
         }
-        let Some(b) = self.outs[i].ed.as_ref().and_then(|e| e.box_ir()) else { return };
-        let target = crate::live_target(&self.outs[i].info);
+        let Some(b) = self.ed.as_ref().and_then(|e| e.box_ir()) else { return };
+        // grabbed again from one monitor: the box must be on one
+        let Some((k, p)) = self.box_part() else {
+            self.toast(i, "Scrolling capture works inside one screen");
+            return;
+        };
+        let b = crate::shapes::IR { x: b.x - p.x as i32, y: b.y - p.y as i32, ..b };
+        let target = crate::live_target(&self.outs[k].info);
         self.close_keep_quiet();
         let Ok((p, _)) = crate::make_popup(Self::popup_spec(430, 118, 0), ScrollPopup::new) else { return };
         crate::set_bars_look(&p.global::<crate::B>(), self.cfg.dark());
@@ -2197,8 +2528,8 @@ pub fn app_name(class_caption: &str, fullscreen: bool) -> String {
 
 impl App {
     /// The app / game the box is on: the top window under the box's middle
-    fn box_app(&self, i: usize) -> String {
-        let Some(e) = self.outs.get(i).and_then(|o| o.ed.as_ref()) else { return String::new() };
+    fn box_app(&self) -> String {
+        let Some(e) = self.ed.as_ref() else { return String::new() };
         let Some(b) = e.boxr else { return String::new() };
         let c = (b.x + b.w / 2.0, b.y + b.h / 2.0);
         e.windows.iter().position(|w| w.contains(c)).and_then(|k| e.window_names.get(k)).cloned().unwrap_or_default()
@@ -2288,30 +2619,193 @@ fn set_handles(m: &Rc<VecModel<crate::Pt>>, pts: Vec<crate::Pt>) {
 }
 
 /// The box content (picture + `doc`'s shapes) as the overlay's layer picture
-fn set_layer_image(c: &Overlay, doc: &crate::shapes::Doc, b: crate::shapes::IR, v: View, sc: f32) {
+fn layer_image(doc: &crate::shapes::Doc, b: crate::shapes::IR) -> Image {
     let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(b.w as u32, b.h as u32);
     if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(buf.make_mut_bytes(), b.w as u32, b.h as u32) {
         crate::shapes::render(doc, b, &mut pm);
     }
-    c.set_layer(Image::from_rgba8_premultiplied(buf));
-    let r = v.rect(&b.f());
-    c.set_lx(r.x / sc);
-    c.set_ly(r.y / sc);
-    c.set_lw(r.w / sc);
-    c.set_lh(r.h / sc);
-    c.set_show_layer(true);
+    Image::from_rgba8_premultiplied(buf)
 }
 
-/// The picture with every colour times f/255 (166 = the picking dim #00000059, 87 = the dim outside the box #000000a8)
-fn scaled_buffer(pic: &Pic, f: u16) -> SharedPixelBuffer<Rgba8Pixel> {
-    let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(pic.w, pic.h);
-    for (d, s) in buf.make_mut_bytes().chunks_exact_mut(4).zip(pic.px.chunks_exact(4)) {
-        d[0] = ((s[0] as u16 * f) / 255) as u8;
-        d[1] = ((s[1] as u16 * f) / 255) as u8;
-        d[2] = ((s[2] as u16 * f) / 255) as u8;
-        d[3] = s[3];
+/// screen.png holds every monitor of the capture joined (a box over several)
+const SPAN_ALL: u32 = u32::MAX - 1;
+
+/// Do two rects touch (shared edge counts: a box just being started is 0 x 0)?
+/// Esc waits for its release: the press is kept (repeats ignored), the release hands back that press to act on.
+/// Every other key goes through as it is. A release without a kept press (it went down before the frozen screen
+/// came) does nothing.
+fn esc_gate(kept: &mut Option<KeyEv>, ev: KeyEv, pressed: bool) -> Option<KeyEv> {
+    if !ev.is("Escape") {
+        return Some(ev);
     }
-    buf
+    if pressed {
+        if kept.is_none() {
+            *kept = Some(ev);
+        }
+        return None;
+    }
+    kept.take()
+}
+
+fn touches(a: &R, b: &R) -> bool {
+    a.x <= b.r() && a.r() >= b.x && a.y <= b.b() && a.b() >= b.y
+}
+
+/// `a` cut to `b` (nothing in common: a 0-size rect at the nearest place)
+fn clip(a: &R, b: &R) -> R {
+    let x0 = a.x.clamp(b.x, b.r());
+    let y0 = a.y.clamp(b.y, b.b());
+    R::new(x0, y0, a.r().clamp(b.x, b.r()) - x0, a.b().clamp(b.y, b.b()) - y0)
+}
+
+/// How far a point is from a rect (0 inside)
+fn rect_dist(r: &R, p: (f32, f32)) -> f32 {
+    (r.x - p.0).max(p.0 - r.r()).max(0.0) + (r.y - p.1).max(p.1 - r.b()).max(0.0)
+}
+
+fn logical_rect(o: &OutInfo) -> R {
+    R::new(o.x as f32, o.y as f32, o.w as f32, o.h as f32)
+}
+
+/// The desktop layout pointer positions are compared in: Linux = logical px (KDE's layout), Windows = physical px
+/// (win.rs outputs: physical origins, monitors of mixed scale don't meet in a logical layout there)
+fn desk_rect(o: &OutInfo) -> R {
+    if cfg!(windows) {
+        R::new(o.x as f32, o.y as f32, o.pw as f32, o.ph as f32)
+    } else {
+        logical_rect(o)
+    }
+}
+
+/// A position on a monitor's frozen screen (logical px, `sc` = its scale) on the desktop layout
+fn desk_point(o: &OutInfo, x: f32, y: f32, sc: f32) -> (f32, f32) {
+    let k = if cfg!(windows) { sc } else { 1.0 };
+    (o.x as f32 + x * k, o.y as f32 + y * k)
+}
+
+/// Physical px per desktop-layout px of a monitor with scale `sc`
+fn desk_unit(sc: f32) -> f32 {
+    if cfg!(windows) {
+        1.0
+    } else {
+        sc
+    }
+}
+
+/// A pointer position on monitor `from`'s frozen screen (logical px) -> the joined screen (physical px); `mons` =
+/// (monitor, its part, its scale). Outside that monitor: through the desktop layout to the monitor it is over (the
+/// nearest one between them), with that monitor's scale.
+fn joined_point(mons: &[(OutInfo, Part, f32)], from: usize, x: f32, y: f32) -> (f32, f32) {
+    let (o, p, sc) = &mons[from];
+    let inside = x >= 0.0 && y >= 0.0 && x < o.w as f32 && y < o.h as f32;
+    if inside || mons.len() < 2 {
+        return (x * sc + p.x, y * sc + p.y);
+    }
+    let d = desk_point(o, x, y, *sc);
+    let dist = |m: &(OutInfo, Part, f32)| rect_dist(&desk_rect(&m.0), d);
+    let Some((o2, p2, sc2)) = mons.iter().min_by(|a, b| dist(a).total_cmp(&dist(b))) else { return (x * sc + p.x, y * sc + p.y) };
+    let r = desk_rect(o2);
+    let u = desk_unit(*sc2);
+    ((d.0 - r.x) * u + p2.x, (d.1 - r.y) * u + p2.y)
+}
+
+/// Where each monitor's own pixels go in ONE picture of all of them (a box can go from one to the other), + its
+/// size. No monitor is scaled: each one's frozen screen shows its part 1:1, a box on one monitor is exactly as
+/// before. Linux: KDE's logical layout stretched piece by piece with the scale of the monitor(s) in each piece, so
+/// neighbours still touch with mixed scale; Windows: the physical places as they are.
+fn span_layout(infos: &[OutInfo]) -> (Vec<Part>, u32, u32) {
+    let places: Vec<(f32, f32)> = if cfg!(windows) {
+        let x0 = infos.iter().map(|o| o.x).min().unwrap_or(0);
+        let y0 = infos.iter().map(|o| o.y).min().unwrap_or(0);
+        infos.iter().map(|o| ((o.x - x0) as f32, (o.y - y0) as f32)).collect()
+    } else {
+        let ax = Axis::new(infos.iter().map(|o| (o.x, o.w, o.scale())).collect());
+        let ay = Axis::new(infos.iter().map(|o| (o.y, o.h, o.scale())).collect());
+        infos.iter().map(|o| (ax.at(o.x).round(), ay.at(o.y).round())).collect()
+    };
+    let parts: Vec<Part> = infos.iter().zip(places).map(|(o, (x, y))| Part { key: o.key, x, y, w: o.pw as f32, h: o.ph as f32 }).collect();
+    let w = parts.iter().map(|p| p.x + p.w).fold(1.0f32, f32::max) as u32;
+    let h = parts.iter().map(|p| p.y + p.h).fold(1.0f32, f32::max) as u32;
+    (parts, w, h)
+}
+
+/// One axis of the logical layout -> physical px: each piece between monitor edges counts with the biggest scale
+/// of the monitors covering it (none = 0: no gap in the picture)
+struct Axis {
+    segs: Vec<(i32, i32, f32)>,
+}
+
+impl Axis {
+    fn new(items: Vec<(i32, i32, f32)>) -> Axis {
+        let mut cuts: Vec<i32> = items.iter().flat_map(|&(s, l, _)| [s, s + l]).collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        let segs = cuts.windows(2).map(|c| (c[0], c[1], items.iter().filter(|&&(s, l, _)| s <= c[0] && s + l >= c[1]).map(|t| t.2).fold(0.0f32, f32::max))).collect();
+        Axis { segs }
+    }
+    fn at(&self, v: i32) -> f32 {
+        self.segs.iter().map(|&(a, b, s)| (v.min(b) - a).max(0) as f32 * s).sum()
+    }
+}
+
+/// The monitors' pictures joined at their `span_layout` places + the frozen screen's three copies of it (plain, a
+/// lighter one while picking: x 166/255, a darker one outside the box: x 87/255), in row bands on every core. One
+/// monitor: its own picture is the editor's (not copied).
+fn stitch_parts(parts: &[Part], w: u32, h: u32, shots: Vec<(u32, Pic)>) -> (Pic, [SharedPixelBuffer<Rgba8Pixel>; 3]) {
+    let mut shots = shots;
+    let single = shots.len() == 1 && parts.first().map(|p| p.x == 0.0 && p.y == 0.0 && shots[0].1.w == w && shots[0].1.h == h).unwrap_or(false);
+    let own = if single { shots.pop().map(|s| s.1) } else { None };
+    let mut joined = if single { None } else { Some(Pic::new(w, h)) };
+    let srcs: Vec<((u32, u32), &Pic)> = match own.as_ref() {
+        Some(p) => vec![((0, 0), p)],
+        None => shots.iter().filter_map(|(k, pic)| parts.iter().find(|p| p.key == *k).map(|p| ((p.x as u32, p.y as u32), pic))).collect(),
+    };
+    let mut bufs = [SharedPixelBuffer::<Rgba8Pixel>::new(w, h), SharedPixelBuffer::<Rgba8Pixel>::new(w, h), SharedPixelBuffer::<Rgba8Pixel>::new(w, h)];
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8) as u32;
+    let band = h.div_ceil(n).max(1);
+    let row = (w * 4) as usize;
+    {
+        let [b0, b1, b2] = &mut bufs;
+        let (c0, c1, c2) = (b0.make_mut_bytes().chunks_mut(band as usize * row), b1.make_mut_bytes().chunks_mut(band as usize * row), b2.make_mut_bytes().chunks_mut(band as usize * row));
+        let cj: Vec<Option<&mut [u8]>> = match joined.as_mut() {
+            Some(j) => j.px.chunks_mut(band as usize * row).map(Some).collect(),
+            None => (0..h.div_ceil(band)).map(|_| None).collect(),
+        };
+        let srcs = &srcs;
+        std::thread::scope(|sc| {
+            for (k, (((d0, d1), d2), dj)) in c0.zip(c1).zip(c2).zip(cj).enumerate() {
+                sc.spawn(move || {
+                    let y0 = k as u32 * band;
+                    let rows = (d0.len() / row) as u32;
+                    let mut dj = dj;
+                    for &((ox, oy), s) in srcs {
+                        let n = s.w.min(w.saturating_sub(ox)) as usize * 4;
+                        for y in y0.max(oy)..(y0 + rows).min(oy + s.h) {
+                            let si = ((y - oy) * s.w * 4) as usize;
+                            let src = &s.px[si..si + n];
+                            let di = ((y - y0) * w + ox) as usize * 4;
+                            if let Some(j) = dj.as_mut() {
+                                j[di..di + n].copy_from_slice(src);
+                            }
+                            d0[di..di + n].copy_from_slice(src);
+                            for ((a, b), p) in d1[di..di + n].chunks_exact_mut(4).zip(d2[di..di + n].chunks_exact_mut(4)).zip(src.chunks_exact(4)) {
+                                a[0] = ((p[0] as u16 * 166) / 255) as u8;
+                                a[1] = ((p[1] as u16 * 166) / 255) as u8;
+                                a[2] = ((p[2] as u16 * 166) / 255) as u8;
+                                a[3] = p[3];
+                                b[0] = ((p[0] as u16 * 87) / 255) as u8;
+                                b[1] = ((p[1] as u16 * 87) / 255) as u8;
+                                b[2] = ((p[2] as u16 * 87) / 255) as u8;
+                                b[3] = p[3];
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+    let pic = own.or(joined).unwrap_or_else(|| Pic::new(w, h));
+    (pic, bufs)
 }
 
 /// The frozen picture darkened like the dim outside the box (#000000a8 over it: x 87/255)
@@ -2413,7 +2907,91 @@ mod tests {
     }
 
     #[test]
-    fn stitch_two_monitors_mixed_scale() {
+    fn esc_acts_when_it_comes_up() {
+        let esc = |shift: bool, repeat: bool| KeyEv { key: "Escape".into(), shift, repeat, ..Default::default() };
+        let mut kept = None;
+        assert!(esc_gate(&mut kept, esc(true, false), true).is_none(), "Shift+Esc down: nothing yet");
+        assert!(esc_gate(&mut kept, esc(false, true), true).is_none(), "held (repeat): nothing");
+        // Shift may come up first: the release acts as the press was (Shift+Esc = throw away)
+        let got = esc_gate(&mut kept, esc(false, false), false).expect("acts on release");
+        assert!(got.shift && !got.repeat);
+        assert!(kept.is_none());
+        // a release whose press came before the frozen screen: nothing
+        assert!(esc_gate(&mut kept, esc(false, false), false).is_none());
+        // other keys: straight through, press and release
+        let a = KeyEv { key: "a".into(), ..Default::default() };
+        assert!(esc_gate(&mut kept, a.clone(), true).is_some());
+        assert!(esc_gate(&mut kept, a, false).is_some());
+    }
+
+    #[test]
+    fn spanning_layout_mixed_scale() {
+        // the user's kind of desk: 1920x1080 at 1.0 on the left, 2560x1440 at 1.25 (logical 2048x1152) on the right
+        let a = OutInfo { key: 1, name: "A".into(), x: 0, y: 0, w: 1920, h: 1080, pw: 1920, ph: 1080 };
+        let b = OutInfo { key: 2, name: "B".into(), x: 1920, y: 0, w: 2048, h: 1152, pw: 2560, ph: 1440 };
+        #[cfg(windows)]
+        let b = OutInfo { w: 2048, ..b };
+        let (parts, w, h) = span_layout(&[a.clone(), b.clone()]);
+        // each monitor at its own pixels, side by side, no gap, nothing scaled
+        assert_eq!((w, h), (4480, 1440));
+        assert_eq!((parts[0].x, parts[0].y, parts[0].w), (0.0, 0.0, 1920.0));
+        assert_eq!((parts[1].x, parts[1].y, parts[1].w, parts[1].h), (1920.0, 0.0, 2560.0, 1440.0));
+        // the joined picture: A's pixels at 0, B's from 1920, below A transparent; the dim copies
+        let (j, [plain, light, dark]) = stitch_parts(&parts, w, h, vec![(1, pic(1920, 1080, 100)), (2, pic(2560, 1440, 200))]);
+        assert_eq!((j.w, j.h), (4480, 1440));
+        assert_eq!(j.at(1919, 500)[0], 100);
+        assert_eq!(j.at(1920, 500)[0], 200);
+        assert_eq!(j.at(4479, 1439)[0], 200);
+        assert_eq!(j.at(100, 1300), [0, 0, 0, 0]);
+        let px = |b: &SharedPixelBuffer<Rgba8Pixel>, x: u32, y: u32| b.as_slice()[(y * w + x) as usize];
+        assert_eq!(px(&plain, 1920, 7).r, 200);
+        assert_eq!(px(&light, 1920, 7).r, (200u16 * 166 / 255) as u8);
+        assert_eq!(px(&dark, 10, 1000).r, (100u16 * 87 / 255) as u8);
+        assert_eq!(px(&dark, 10, 1300).a, 0);
+        // a drag from A that went on to B: Wayland keeps sending it to A's surface (logical px of A, beyond its edge)
+        let mons = vec![(a.clone(), parts[0], 1.0), (b.clone(), parts[1], 1.25)];
+        assert_eq!(joined_point(&mons, 0, 100.0, 200.0), (100.0, 200.0));
+        #[cfg(not(windows))]
+        {
+            // 100 logical px into B = 125 of B's pixels
+            assert_eq!(joined_point(&mons, 0, 2020.0, 200.0), (1920.0 + 125.0, 250.0));
+            // and back from B onto A
+            assert_eq!(joined_point(&mons, 1, -20.0, 100.0), (1900.0, 100.0));
+            // on B, inside: its own scale
+            assert_eq!(joined_point(&mons, 1, 100.0, 100.0), (1920.0 + 125.0, 125.0));
+        }
+        // one monitor: its own picture, not copied
+        let one = pic(800, 600, 50);
+        let ptr = one.px.as_ptr();
+        let (parts, w, h) = span_layout(&[OutInfo { key: 7, w: 800, h: 600, pw: 800, ph: 600, ..Default::default() }]);
+        let (p1, _) = stitch_parts(&parts, w, h, vec![(7, one)]);
+        assert_eq!(p1.px.as_ptr(), ptr);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn spanning_layout_stacked_and_left() {
+        // B (scale 1.25) above A, and a monitor left of x 0: they still touch, none overlaps
+        let a = OutInfo { key: 1, x: 0, y: 1152, w: 1920, h: 1080, pw: 1920, ph: 1080, ..Default::default() };
+        let b = OutInfo { key: 2, x: 0, y: 0, w: 2048, h: 1152, pw: 2560, ph: 1440, ..Default::default() };
+        let c = OutInfo { key: 3, x: -1280, y: 1152, w: 1280, h: 1024, pw: 1280, ph: 1024, ..Default::default() };
+        let (parts, w, h) = span_layout(&[a, b, c]);
+        let p = |k: u32| *parts.iter().find(|p| p.key == k).unwrap();
+        assert_eq!((p(3).x, p(3).y), (0.0, 1440.0));
+        assert_eq!((p(2).x, p(2).y), (1280.0, 0.0));
+        assert_eq!((p(1).x, p(1).y), (1280.0, 1440.0));
+        assert_eq!((w, h), (1280 + 2560, 1440 + 1080));
+        for x in &parts {
+            for y in &parts {
+                if x.key != y.key {
+                    assert!(x.x + x.w <= y.x || y.x + y.w <= x.x || x.y + x.h <= y.y || y.y + y.h <= x.y, "{x:?} {y:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+        fn stitch_two_monitors_mixed_scale() {
         // a 1920x1080 monitor at 1.0 on the left, a 2560x1440 one at 1.25 (logical 2048x1152) on the right
         let a = OutInfo { key: 1, name: "A".into(), x: 0, y: 0, w: 1920, h: 1080, pw: 1920, ph: 1080 };
         let b = OutInfo { key: 2, name: "B".into(), x: 1920, y: 0, w: 2048, h: 1152, pw: 2560, ph: 1440 };
@@ -2439,5 +3017,18 @@ fn clean_drag_dir(dir: &std::path::Path) {
         if old {
             let _ = std::fs::remove_file(e.path());
         }
+    }
+}
+
+/// Ends a Settings / Library window process (SIGTERM on Linux) and waits for it
+fn end_child(c: &mut std::process::Child) {
+    if matches!(c.try_wait(), Ok(None)) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(c.id() as i32, libc::SIGTERM);
+        }
+        #[cfg(windows)]
+        let _ = c.kill();
+        let _ = c.wait();
     }
 }

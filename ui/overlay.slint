@@ -6,6 +6,13 @@
 
 import { B, I, Kbd, BarBtn, Ico, Logo, Sw } from "bars.slint";
 
+// one button of the bar under the box (Settings > "Buttons under the box"; the id is the editor action)
+export struct BarItem {
+    id: string,
+    text: string,
+    kbd: string,
+}
+
 export struct ToolItem {
     id: string,
     icon: string,
@@ -67,10 +74,24 @@ export component Overlay inherits Window {
     in property <length> lh;
 
     in property <bool> has-box;
+    // a library picture (22 Nov 2026): only the box's picture on a plain backdrop - no rest of the screen, no frame
+    in property <bool> only-box;
+    // ... its viewer look (22 Nov 2026, "a gray screen looks strange, more refined like Echo"): the picture blurred
+    // and darkened behind it, a top bar with Back, its name and the zoom
+    in property <image> view-bg;
+    in property <string> view-title;
+    in property <string> zoom-text;
     in property <length> bx;
     in property <length> by;
     in property <length> bw;
     in property <length> bh;
+    // a box over several monitors: the bars + size chip go on ONE of them (bars-here), around the part of the box
+    // on it (ubx..: the box cut to this monitor; one monitor = the box)
+    in property <bool> bars-here: true;
+    in property <length> ubx: root.bx;
+    in property <length> uby: root.by;
+    in property <length> ubw: root.bw;
+    in property <length> ubh: root.bh;
     // Pick phase (no tools yet) / the box is being dragged out
     in property <bool> picking: true;
     in property <bool> dragging;
@@ -106,6 +127,18 @@ export component Overlay inherits Window {
     in property <string> timer-label: "Timer";
     in property <bool> pointer-on;
     in property <bool> link-on: true;
+    // the actions bar's buttons in order (Settings > Capture > "Buttons under the box", any editor action)
+    in property <[BarItem]> bar-items;
+    property <bool> bar-any: root.bar-items.length > 0;
+    pure function bar-icon(id: string) -> string {
+        return id == "pin" ? I.pin : id == "save" || id == "save_copy" ? I.save : id == "save_as" ? I.folder
+            : id == "copy" || id == "copy_stay" ? I.copy : id == "copy_save" ? I.save : id == "copy_text" ? I.ocr
+            : id == "link" ? I.link : id == "redact" ? I.blur : id == "background" ? I.rect
+            : id == "scroll" ? I.arrow : id == "new_box" ? I.crop : id == "last_box" ? I.restore
+            : id == "whole_screen" ? I.crop : id == "hide_bars" ? I.spotlight : id == "undo" ? I.undo
+            : id == "redo" ? I.redo : id == "library" ? I.recent : id == "open" ? I.folder
+            : id == "discard" ? I.trash : id == "close" ? I.close : I.check;
+    }
 
     in property <bool> win-hover;
     in property <length> wx;
@@ -161,7 +194,23 @@ export component Overlay inherits Window {
     }
 
     // --- the picture -------------------------------------------------------------------------------------
-    Image {
+    if root.only-box: Rectangle {
+        background: #0d0e11;
+        Image { width: parent.width; height: parent.height; source: root.view-bg; image-fit: cover; }
+        Rectangle { background: #000000b0; }
+    }
+    // a soft shadow under the picture
+    if root.only-box && root.has-box: Rectangle {
+        x: root.bx;
+        y: root.by;
+        width: root.bw;
+        height: root.bh;
+        drop-shadow-blur: 40px;
+        drop-shadow-offset-y: 10px;
+        drop-shadow-color: #000000c0;
+        background: #000;
+    }
+    if !root.only-box: Image {
         x: root.vx;
         y: root.vy;
         width: root.vw;
@@ -170,7 +219,7 @@ export component Overlay inherits Window {
         image-fit: ImageFit.fill;
         image-rendering: root.pixelated ? ImageRendering.pixelated : ImageRendering.smooth;
     }
-    if root.has-box && root.dim-ready: Image {
+    if root.has-box && (root.dim-ready || root.only-box): Image {
         x: root.bx;
         y: root.by;
         width: root.bw;
@@ -215,7 +264,7 @@ export component Overlay inherits Window {
         Rectangle { x: root.wx + root.ww; y: root.wy; width: root.width - root.wx - root.ww; height: root.wh; background: #000000a8; }
         Rectangle { x: root.wx; y: root.wy; width: root.ww; height: root.wh; border-width: 3px; border-color: B.accent; }
     }
-    if root.has-box && !root.dim-ready: Rectangle {
+    if root.has-box && !root.dim-ready && !root.only-box: Rectangle {
         Rectangle { x: 0; y: 0; width: root.width; height: max(0px, root.by); background: #000000a8; }
         Rectangle { x: 0; y: root.by + root.bh; width: root.width; height: max(0px, root.height - root.by - root.bh); background: #000000a8; }
         Rectangle { x: 0; y: root.by; width: max(0px, root.bx); height: root.bh; background: #000000a8; }
@@ -243,7 +292,7 @@ export component Overlay inherits Window {
     }
 
     // --- the box, selection, caret -----------------------------------------------------------------------
-    if root.has-box: Rectangle {
+    if root.has-box && !root.only-box: Rectangle {
         x: root.bx - 1px;
         y: root.by - 1px;
         width: root.bw + 2px;
@@ -364,9 +413,11 @@ export component Overlay inherits Window {
             }
         }
     }
-    if root.picking && root.has-box: Rectangle {
-        x: min(max(4px, root.bx + root.bw - self.width), root.width - self.width - 4px);
-        y: root.by + root.bh + 10px + self.height < root.height ? root.by + root.bh + 10px : root.by + root.bh - self.height - 8px;
+    if root.picking && root.has-box && root.bars-here: Rectangle {
+        x: min(max(4px, root.ubx + root.ubw - self.width), root.width - self.width - 4px);
+        // below the box, else above it (not inside, over the picture being picked)
+        y: root.uby + root.ubh + 10px + self.height < root.height ? root.uby + root.ubh + 10px
+            : root.uby - 10px - self.height >= 4px ? root.uby - 10px - self.height : root.uby + root.ubh - self.height - 8px;
         width: chip-t.preferred-width + 18px;
         height: 24px;
         border-radius: 6px;
@@ -381,9 +432,17 @@ export component Overlay inherits Window {
         }
     }
     if root.picking: Rectangle {
-        // hint bar, bottom centre
+        // hint bar, bottom centre - out of the box's way while it's dragged out, like the top bar (the user, 21 Nov
+        // 2026: "everything that moves away from the selection moves live as you move the mouse"): above the top bar
+        // when that went down, else at the top under it; hidden when the box covers both places
+        property <bool> over-x: root.has-box && root.bx < self.x + self.width && root.bx + root.bw > self.x;
+        property <length> low-y: modes.hits-top ? modes.y - self.height - 10px : root.height - self.height - 64px;
+        property <length> high-y: modes.hits-top ? 22px : 22px + 42px + 10px;
+        property <bool> low-hit: self.over-x && root.by + root.bh > self.low-y - 8px && root.by < self.low-y + self.height + 8px;
+        property <bool> high-hit: self.over-x && root.by + root.bh > self.high-y - 8px && root.by < self.high-y + self.height + 8px;
+        visible: !(self.low-hit && self.high-hit);
         x: (root.width - self.width) / 2;
-        y: root.height - self.height - 64px;
+        y: self.low-hit ? self.high-y : self.low-y;
         width: hint.preferred-width + 28px;
         height: 36px;
         border-radius: 10px;
@@ -405,6 +464,52 @@ export component Overlay inherits Window {
         }
     }
 
+    // --- viewer bar (a library picture, instead of the capture's mode bar) ----------------------------------
+    if root.only-box && !root.bars-hidden && root.bars-here: Rectangle {
+        x: 22px;
+        y: 22px;
+        width: root.width - 44px;
+        height: 42px;
+        Rectangle {
+            width: vl.preferred-width;
+            x: 0;
+            border-radius: 10px;
+            background: B.bar;
+            border-width: 1px;
+            border-color: B.line;
+            drop-shadow-blur: 30px;
+            drop-shadow-color: #00000099;
+            vl := HorizontalLayout {
+                padding: 5px;
+                padding-right: 14px;
+                spacing: 10px;
+                BarBtn { y: (parent.height - self.height) / 2; icon: "M15 18l-6-6l6-6"; text: "Back"; kbd: "Esc"; clicked => { root.cmd("close"); } }
+                Rectangle { width: 1px; background: B.line; }
+                Text { text: root.view-title; color: B.text; font-size: 13px; font-weight: 600; vertical-alignment: center; overflow: elide; max-width: 520px; }
+            }
+        }
+        Rectangle {
+            width: zl.preferred-width;
+            x: parent.width - self.width;
+            border-radius: 10px;
+            background: B.bar;
+            border-width: 1px;
+            border-color: B.line;
+            drop-shadow-blur: 30px;
+            drop-shadow-color: #00000099;
+            zl := HorizontalLayout {
+                padding: 5px;
+                spacing: 2px;
+                BarBtn { y: (parent.height - self.height) / 2; text: "−"; clicked => { root.cmd("zoom_out"); } }
+                Text { text: root.zoom-text; color: B.text; font-size: 12.5px; width: 48px; horizontal-alignment: center; vertical-alignment: center; }
+                BarBtn { y: (parent.height - self.height) / 2; text: "+"; clicked => { root.cmd("zoom_in"); } }
+                Rectangle { width: 1px; background: B.line; }
+                BarBtn { y: (parent.height - self.height) / 2; text: "Fit"; kbd-plain: "Ctrl 0"; clicked => { root.cmd("zoom_fit"); } }
+                BarBtn { y: (parent.height - self.height) / 2; text: "100 %"; kbd-plain: "Ctrl 1"; clicked => { root.cmd("zoom_100"); } }
+            }
+        }
+    }
+
     // --- mode bar (top) ------------------------------------------------------------------------------------
     modes := Rectangle {
         property <bool> hov: mb-ta.has-hover;
@@ -415,7 +520,7 @@ export component Overlay inherits Window {
         property <bool> over-x: root.has-box && root.bx < self.x + self.width && root.bx + root.bw > self.x;
         property <bool> hits-top: self.over-x && root.by < self.top-y + self.height + 8px;
         property <bool> hits-bottom: self.over-x && root.by + root.bh > self.bottom-y - 8px;
-        visible: !root.bars-hidden && !(self.hits-top && self.hits-bottom);
+        visible: !root.bars-hidden && !root.only-box && !(self.hits-top && self.hits-bottom);
         x: (root.width - self.width) / 2;
         y: self.hits-top ? self.bottom-y : self.top-y;
         width: mhl.preferred-width;
@@ -477,21 +582,35 @@ export component Overlay inherits Window {
 
     // --- options bar (above the box) ----------------------------------------------------------------------
     property <length> gap: 10px;
-    property <bool> show-bars: root.has-box && !root.picking && !root.bars-hidden;
+    property <bool> show-bars: root.has-box && !root.picking && !root.bars-hidden && root.bars-here;
     property <length> opt-h: 42px;
     property <length> act-h: 42px;
-    // below the actions there must be room, else the bars go inside the box
-    property <bool> act-below: root.by + root.bh + 12px + root.act-h <= root.height - 8px;
-    property <length> act-y: root.act-below ? root.by + root.bh + 12px : max(8px, root.by + root.bh - root.act-h - 8px);
-    property <bool> opt-above: root.by - root.opt-h - root.gap >= 72px;
-    property <length> opt-y: root.opt-above ? root.by - root.opt-h - root.gap
-        : (root.act-below && root.by + root.bh + 12px + root.act-h + 8px + root.opt-h <= root.height - 8px) ? root.by + root.bh + 12px + root.act-h + 8px
-        : max(72px, root.by + 8px);
-    property <bool> small: root.bw < 420px;
+    // The actions go below the box; no room there (a box at the bottom of the screen) = ABOVE it, never inside it
+    // over the picture (21 Nov 2026: "the UI goes into the screenshot itself, especially a small selection"). Only a box
+    // with no room above or below (almost the whole screen high) gets them inside.
+    property <bool> act-below: root.uby + root.ubh + 12px + root.act-h <= root.height - 8px;
+    property <bool> act-above: !root.act-below && root.uby - 12px - root.act-h >= 72px;
+    property <length> act-y: root.act-below ? root.uby + root.ubh + 12px
+        : root.act-above ? root.uby - 12px - root.act-h
+        : max(8px, root.uby + root.ubh - root.act-h - 8px);
+    // the options sit above the box (above the actions when those are up there too), else below the actions
+    property <length> opt-top: root.act-above ? root.act-y : root.uby;
+    property <bool> opt-above: root.opt-top - root.opt-h - root.gap >= 72px;
+    property <length> opt-y: root.opt-above ? root.opt-top - root.opt-h - root.gap
+        : (root.act-below && root.uby + root.ubh + 12px + root.act-h + 8px + root.opt-h <= root.height - 8px) ? root.uby + root.ubh + 12px + root.act-h + 8px
+        : max(72px, root.uby + 8px);
+    property <bool> small: root.ubw < 420px;
+    // where the tool strip goes (right of the box, else left, else inside): the options bar keeps clear of it
+    property <length> strip-w: 46px;
+    property <length> strip-right-x: root.ubx + root.ubw + 12px;
+    property <length> strip-left-x: root.ubx - 12px - root.strip-w;
+    property <bool> strip-right: root.strip-right-x + root.strip-w <= root.width - 8px;
+    property <length> strip-x: root.strip-right ? root.strip-right-x : root.strip-left-x >= 8px ? root.strip-left-x : root.ubx + root.ubw - root.strip-w - 8px;
 
     Rectangle {
         visible: root.show-bars;
-        x: min(max(8px, root.bx), root.width - self.width - 8px);
+        // a box narrower than the bar: it shifts left instead of running under the tool strip (21 Nov 2026)
+        x: max(8px, min(min(root.ubx, root.width - self.width - 8px), root.strip-right ? root.strip-x - 8px - self.width : root.ubx));
         y: root.opt-y;
         width: ohl.preferred-width;
         height: root.opt-h;
@@ -593,11 +712,9 @@ export component Overlay inherits Window {
     // --- tool strip (right of the box) --------------------------------------------------------------------
     Rectangle {
         visible: root.show-bars;
-        property <length> right-x: root.bx + root.bw + 12px;
-        property <length> left-x: root.bx - 12px - self.width;
-        x: self.right-x + self.width <= root.width - 8px ? self.right-x : self.left-x >= 8px ? self.left-x : root.bx + root.bw - self.width - 8px;
-        y: min(max(72px, root.by), root.height - self.height - 8px);
-        width: 46px;
+        x: root.strip-x;
+        y: min(max(72px, root.uby), root.height - self.height - 8px);
+        width: root.strip-w;
         height: tvl.preferred-height;
         border-radius: 10px;
         background: B.bar;
@@ -651,18 +768,19 @@ export component Overlay inherits Window {
 
     // --- size chip + actions (below the box) --------------------------------------------------------------
     if root.show-bars: Rectangle {
-        x: max(8px, root.bx);
+        x: max(8px, root.ubx);
         y: root.act-y + (root.act-h - self.height) / 2;
         width: cst.preferred-width + 18px;
         height: 24px;
         border-radius: 6px;
         background: B.accent;
-        visible: root.bw > 260px || !root.act-below;
+        // a narrow box: no room next to the actions (and never inside the box over the picture)
+        visible: root.ubw > 260px && (root.act-below || root.act-above);
         cst := Text { text: root.size-label; color: white; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
     }
     Rectangle {
-        visible: root.show-bars;
-        x: min(max(8px, root.bx + root.bw - self.width), root.width - self.width - 8px);
+        visible: root.show-bars && root.bar-any;
+        x: min(max(8px, root.ubx + root.ubw - self.width), root.width - self.width - 8px);
         y: root.act-y;
         width: ahl.preferred-width;
         height: root.act-h;
@@ -676,12 +794,19 @@ export component Overlay inherits Window {
         ahl := HorizontalLayout {
             padding: 5px;
             spacing: 3px;
-            BarBtn { icon: I.pin; text: root.small ? "" : "Pin"; kbd-plain: root.small ? "" : "Ctrl T"; clicked => { root.cmd("pin"); } }
-            BarBtn { icon: I.save; text: root.small ? "" : "Save"; kbd-plain: root.small ? "" : "Ctrl S"; clicked => { root.cmd("save"); } }
-            BarBtn { icon: I.copy; text: root.small ? "" : "Copy"; kbd-plain: root.small ? "" : "Ctrl C"; clicked => { root.cmd("copy"); } }
-            if root.link-on: BarBtn { icon: I.link; text: root.small ? "" : "Share link"; kbd-plain: root.small ? "" : "Ctrl L"; primary: true; clicked => { root.cmd("link"); } }
-            Rectangle { width: 9px; Rectangle { x: 4px; y: 10px; width: 1px; height: parent.height - 20px; background: B.line; } }
-            BarBtn { icon: I.check; icon-accent: true; kbd-plain: "Enter"; clicked => { root.cmd("done"); } }
+            for b[i] in root.bar-items: HorizontalLayout {
+                spacing: 3px;
+                // Done: a line before it, just the check + its key (as before the bar was customizable)
+                if b.id == "done" && i > 0: Rectangle { width: 9px; Rectangle { x: 4px; y: 10px; width: 1px; height: parent.height - 20px; background: B.line; } }
+                if b.id == "done": BarBtn { icon: I.check; icon-accent: true; kbd-plain: b.kbd; clicked => { root.cmd(b.id); } }
+                if b.id != "done": BarBtn {
+                    icon: root.bar-icon(b.id);
+                    text: root.small ? "" : b.text;
+                    kbd-plain: root.small ? "" : b.kbd;
+                    primary: b.id == "link";
+                    clicked => { root.cmd(b.id); }
+                }
+            }
         }
     }
 

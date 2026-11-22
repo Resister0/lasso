@@ -92,6 +92,14 @@ fn handle(st: &Mutex<Server>, base: &str, m: &str, path: &str, auth: &str, body:
                 (400, json!({"error": "Wrong code"}).to_string())
             }
         }
+        ("POST", "/auth/device") => {
+            if j["device"].as_str().is_some_and(|k| k.len() == 64) {
+                s.tokens.push(TOKEN.into());
+                (200, json!({"token": TOKEN, "device": true}).to_string())
+            } else {
+                (400, json!({"error": "Bad device key"}).to_string())
+            }
+        }
         ("POST", "/auth/logout") => {
             s.tokens.clear();
             (200, json!({"ok": true}).to_string())
@@ -168,13 +176,21 @@ fn old_server_gets_no_upload() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// No account (21 Nov 2026): the first link makes a device key, the server turns it into a session; the next link
+/// reuses that session (one /auth/device call), the key stays the same
 #[test]
-fn not_signed_in_calls_nothing() {
+fn not_signed_in_uses_a_device_key() {
     let m = mock(true);
     let d = scratch("signed-out");
     let st = Store::at(&d);
-    assert_eq!(run(&net::Net, &m.base, &st, job("cap1", b"png"), 30).unwrap_err(), Fail::SignedOut);
-    assert!(m.st.lock().unwrap().log.is_empty());
+    run(&net::Net, &m.base, &st, job("cap1", b"png"), 30).unwrap();
+    let (key, token) = st.device();
+    assert_eq!(key.len(), 64);
+    assert_eq!(token, TOKEN);
+    run(&net::Net, &m.base, &st, job("cap2", b"png"), 30).unwrap();
+    assert_eq!(st.device().0, key);
+    let log = m.st.lock().unwrap().log.clone();
+    assert_eq!(log.iter().filter(|l| *l == "POST /auth/device").count(), 1, "{log:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -454,7 +454,7 @@ pub fn start_hotkeys(fire: impl Fn(&str) + Send + Sync + 'static) {
         let _ = std::fs::remove_file(hk_status_file());
         return;
     }
-    let ids = ["region", "full", "window", "repeat", "restore"];
+    let ids = ["region", "full", "window", "repeat", "restore", "delete"];
     let keys: Vec<(usize, Option<(u32, u32)>)> = ids.iter().enumerate().map(|(i, id)| (i, parse_hotkey(cfg.get(&format!("hk.{id}"))))).collect();
     let (tx, rx) = std::sync::mpsc::channel::<u32>();
     let h = std::thread::spawn(move || unsafe {

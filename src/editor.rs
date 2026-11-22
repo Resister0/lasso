@@ -101,6 +101,8 @@ pub enum Fx {
     Paste,
     Save,
     SaveAs,
+    /// Ctrl+Shift+D: the picture as it is now becomes a new library picture; the one opened stays as it was
+    SaveCopy,
     Link,
     Pin,
     Open,
@@ -132,6 +134,9 @@ pub enum Fx {
     Toast(String),
 }
 
+/// undo steps kept with a library picture
+pub const HISTORY_KEPT: usize = 40;
+
 #[derive(Clone)]
 struct Snap {
     boxr: Option<R>,
@@ -148,6 +153,8 @@ enum Drag {
     Draw { idx: usize, start: (f32, f32) },
     MoveSel { last: (f32, f32), moved: bool },
     ResizeShape { idx: usize, handle: u8, orig: Shape, start: (f32, f32) },
+    /// a library picture zoomed in: the drag moves it around (screen px)
+    Pan { last: (f32, f32) },
 }
 
 pub struct Editor {
@@ -176,12 +183,19 @@ pub struct Editor {
     pub ctrl: bool,
     pub alt: bool,
     pub space: bool,
-    /// Windows on this monitor, top first (picture px) - filled in after the freeze
+    /// Windows on the frozen screen(s), top first (picture px) - filled in after the freeze
     pub windows: Vec<R>,
+    /// Each monitor's part of the picture when one capture spans several (picture px; empty = one screen = the whole
+    /// picture): Screen mode / "whole screen" / a click on the desktop take the monitor under the mouse
+    pub screens: Vec<R>,
     /// app / game name of each window in `windows` (same order)
     pub window_names: Vec<String>,
     pub hover_win: Option<R>,
     pub keys_sheet: bool,
+    /// A picture from the library or a file (the user, 22 Nov 2026: "entering a cropped screenshot shows the whole crop
+    /// window again with the selector", "accidentally dragging draws an arrow"): only the picture is shown (no box, no
+    /// handles), Select draws nothing, the wheel zooms and a drag moves a zoomed-in picture. Crop (C) brings the box back.
+    pub lib_view: bool,
     crop_backup: Option<R>,
     pub pixelate: bool,
     pub keymap: Keymap,
@@ -244,9 +258,11 @@ impl Editor {
             alt: false,
             space: false,
             windows: vec![],
+            screens: vec![],
             window_names: vec![],
             hover_win: None,
             keys_sheet: false,
+            lib_view: false,
             crop_backup: None,
             pixelate: true,
             keymap,
@@ -264,6 +280,39 @@ impl Editor {
 
     pub fn pic_rect(&self) -> R {
         R::new(0.0, 0.0, self.doc.base.w as f32, self.doc.base.h as f32)
+    }
+
+    /// The box fitted to the screen (library pictures open like this; zooming all the way out comes back to it)
+    pub fn box_view(&self) -> View {
+        let b = self.boxr.unwrap_or(self.pic_rect());
+        let v = View::fit(b.w.max(1.0), b.h.max(1.0), self.screen.0, self.screen.1, 90.0);
+        View { ox: (v.ox - b.x * v.s).round(), oy: (v.oy - b.y * v.s).round(), s: v.s }
+    }
+    /// Only the picture on the screen: a library picture, except while cropping it again
+    pub fn only_box(&self) -> bool {
+        self.lib_view && self.phase == Phase::Edit && self.tool != Tool::Crop
+    }
+    fn zoomed_in(&self) -> bool {
+        self.view.s > self.box_view().s * 1.001
+    }
+
+    /// The undo steps, oldest first, without pasted pictures (kept with the library picture: Ctrl+Z still works after
+    /// it's opened again - the user, 22 Nov 2026: "those arrows are just permanently stuck on the picture")
+    pub fn history(&self) -> Vec<(Option<R>, Vec<Shape>)> {
+        let n = self.undo.len().saturating_sub(HISTORY_KEPT);
+        self.undo[n..].iter().map(|u| (u.boxr, u.shapes.clone())).collect()
+    }
+    pub fn set_history(&mut self, h: Vec<(Option<R>, Vec<Shape>)>) {
+        let images = self.doc.images.clone();
+        self.undo = h.into_iter().map(|(boxr, shapes)| Snap { boxr, shapes, images: images.clone() }).collect();
+        self.redo.clear();
+    }
+
+    /// The monitor under the mouse (the nearest one when the mouse is between them); the whole picture with one screen
+    pub fn screen_rect(&self) -> R {
+        let m = self.mouse;
+        let d = |r: &R| (r.x - m.0).max(m.0 - r.r()).max(0.0) + (r.y - m.1).max(m.1 - r.b()).max(0.0);
+        self.screens.iter().min_by(|a, b| d(a).total_cmp(&d(b))).copied().unwrap_or_else(|| self.pic_rect())
     }
 
     pub fn style(&self) -> Style {
@@ -416,6 +465,11 @@ impl Editor {
         self.windows.iter().find(|w| w.contains(p)).map(|w| self.clamp_box(*w)).filter(|w| w.w > 2.0 && w.h > 2.0)
     }
 
+    /// A box from outside (the last box again): clamped to the picture, tools appear
+    pub fn set_box(&mut self, r: R) {
+        self.take_box(r);
+    }
+
     /// The box is picked: tools appear.
     fn take_box(&mut self, r: R) {
         self.boxr = Some(self.clamp_box(r));
@@ -447,7 +501,7 @@ impl Editor {
         }
         if self.phase == Phase::Pick {
             if self.mode == Mode::Screen {
-                self.take_box(self.pic_rect());
+                self.take_box(self.screen_rect());
                 return fx;
             }
             self.drag = Some(Drag::NewBox { start: p, moved: false });
@@ -464,7 +518,7 @@ impl Editor {
         }
         let b = self.boxr.unwrap_or_default();
         // 1. the box's own handles (every tool)
-        if self.tool != Tool::Picker {
+        if self.tool != Tool::Picker && !self.only_box() {
             if let Some(h) = self.hit_handle(&b, p) {
                 self.checkpoint();
                 self.drag = Some(Drag::ResizeBox { handle: h, orig: b, start: p });
@@ -498,6 +552,17 @@ impl Editor {
                         return fx;
                     }
                 }
+            }
+        }
+        // a library picture: Select on the picture (not on a shape) and anything outside it draws nothing - a drag
+        // moves the picture once it's zoomed in
+        if self.only_box() {
+            let on_shape = self.tool == Tool::Select && self.shape_at(p).is_some();
+            if !on_shape && (self.tool == Tool::Select || !b.contains(p)) {
+                if self.zoomed_in() {
+                    self.drag = Some(Drag::Pan { last: (sx, sy) });
+                }
+                return fx;
             }
         }
         // a drag that starts outside the box = a new box (the user, 21 Nov 2026: "need to be able to select an area when
@@ -617,6 +682,12 @@ impl Editor {
             return;
         };
         match drag {
+            Drag::Pan { last } => {
+                self.view.ox += sx - last.0;
+                self.view.oy += sy - last.1;
+                self.drag = Some(Drag::Pan { last: (sx, sy) });
+                self.changed();
+            }
             Drag::NewBox { start, moved } => {
                 if self.space {
                     // hold Space: move the box instead of resizing (macOS)
@@ -747,7 +818,7 @@ impl Editor {
                     // a click without dragging: Window mode = the window under the mouse, else the whole monitor;
                     // Area mode = nothing, only a drag makes a box (the user, 20 Nov 2026: no automatic window grab)
                     if self.mode == Mode::Window {
-                        let r = self.window_at(p).unwrap_or_else(|| self.pic_rect());
+                        let r = self.window_at(p).unwrap_or_else(|| self.screen_rect());
                         self.take_box(r);
                     } else {
                         self.boxr = None;
@@ -784,6 +855,7 @@ impl Editor {
                     self.drop_checkpoint();
                 }
             }
+            Drag::Pan { .. } => {}
             Drag::MoveBox { .. } | Drag::ResizeShape { .. } => {
                 // a click on the box / a handle without moving: no empty undo step (review D8)
                 if self.undo.last().is_some_and(|u| u.boxr == self.boxr && u.shapes == self.doc.shapes) {
@@ -813,9 +885,14 @@ impl Editor {
 
     /// Wheel: Ctrl = zoom around the mouse, else the size of the tool / selection
     pub fn wheel(&mut self, sx: f32, sy: f32, dy: f32) {
-        if self.ctrl {
+        if self.ctrl || (self.only_box() && self.tool == Tool::Select && self.sel.is_empty()) {
             let f = if dy > 0.0 { 1.0 / 1.15 } else { 1.15 };
             self.zoom_at(sx, sy, self.view.s * f);
+            // a library picture: zoomed all the way out = fitted and centred again (no picture lost off screen)
+            if self.only_box() && !self.zoomed_in() {
+                self.view = self.box_view();
+                self.changed();
+            }
         } else if self.phase == Phase::Edit {
             self.bump_size(if dy > 0.0 { -1.0 } else { 1.0 });
         }
@@ -1034,7 +1111,7 @@ impl Editor {
                     self.checkpoint();
                 }
                 self.drag = None;
-                self.take_box(self.pic_rect());
+                self.take_box(self.screen_rect());
             }
             "take_colour" => {
                 let c = self.doc.base.at(self.mouse.0 as i32, self.mouse.1 as i32);
@@ -1109,6 +1186,12 @@ impl Editor {
             }
             "zoom_in" => self.zoom_at(self.screen.0 / 2.0, self.screen.1 / 2.0, self.view.s * 1.25),
             "zoom_out" => self.zoom_at(self.screen.0 / 2.0, self.screen.1 / 2.0, self.view.s / 1.25),
+            "zoom_fit" if self.lib_view => self.view = self.box_view(),
+            "zoom_100" if self.lib_view => {
+                let b = self.boxr.unwrap_or(self.pic_rect());
+                let c = self.view.to_screen((b.x + b.w / 2.0, b.y + b.h / 2.0));
+                self.zoom_at(c.0, c.1, 1.0);
+            }
             "zoom_fit" => {
                 let b = &self.doc.base;
                 self.view = if b.w as f32 <= self.screen.0 && b.h as f32 <= self.screen.1 && (b.w as f32 == self.screen.0) {
@@ -1154,6 +1237,10 @@ impl Editor {
                 if self.tool == Tool::Crop && self.phase == Phase::Edit {
                     self.crop_backup = None;
                     self.tool = self.prev_tool;
+                    if self.lib_view {
+                        self.view = self.box_view();
+                        self.changed();
+                    }
                     return vec![];
                 }
                 if !has_box {
@@ -1162,7 +1249,7 @@ impl Editor {
                 take(self);
                 return vec![Fx::Done];
             }
-            "copy" | "save" | "save_as" | "link" | "pin" | "copy_text" | "redact" | "background" | "copy_save" | "copy_stay" => {
+            "copy" | "save" | "save_as" | "save_copy" | "link" | "pin" | "copy_text" | "redact" | "background" | "copy_save" | "copy_stay" => {
                 if !has_box {
                     return vec![];
                 }
@@ -1171,6 +1258,7 @@ impl Editor {
                     "copy" => Fx::Copy,
                     "save" => Fx::Save,
                     "save_as" => Fx::SaveAs,
+                    "save_copy" => Fx::SaveCopy,
                     "link" => Fx::Link,
                     "pin" => Fx::Pin,
                     "redact" => Fx::Redact,
@@ -1246,10 +1334,10 @@ impl Editor {
         match m {
             Mode::Screen => {
                 if self.phase == Phase::Pick || self.doc.shapes.is_empty() {
-                    self.take_box(self.pic_rect());
+                    self.take_box(self.screen_rect());
                 } else {
                     self.checkpoint();
-                    self.boxr = Some(self.pic_rect());
+                    self.boxr = Some(self.screen_rect());
                     self.changed();
                 }
             }
@@ -1511,6 +1599,66 @@ mod tests {
     fn ck(key: &str) -> KeyEv {
         KeyEv { key: key.into(), ctrl: true, ..Default::default() }
     }
+    /// a library picture (22 Nov 2026): only the picture, a drag draws nothing, the wheel zooms, a zoomed-in drag
+    /// moves it, Crop brings the box back, and the undo steps survive closing it
+    #[test]
+    fn library_picture_view_and_history() {
+        let open = |shapes: Vec<Shape>, hist: Vec<(Option<R>, Vec<Shape>)>| {
+            let mut e = ed();
+            e.boxr = Some(R::new(100.0, 100.0, 100.0, 50.0));
+            e.doc.shapes = shapes;
+            e.phase = Phase::Edit;
+            e.lib_view = true;
+            e.tool = Tool::Select;
+            e.view = e.box_view();
+            e.set_history(hist);
+            e
+        };
+        let mut e = open(vec![], vec![]);
+        // fitted: the 100 x 50 box in the middle of the 400 x 300 screen at 100 %
+        assert_eq!((e.view.ox, e.view.oy, e.view.s), (50.0, 25.0, 1.0));
+        assert!(e.only_box());
+        // a drag on the picture and one outside it: nothing drawn, no new box, nothing moved
+        for (a, b) in [((160.0, 130.0), (240.0, 170.0)), ((20.0, 20.0), (120.0, 90.0))] {
+            e.pointer_down(a.0, a.1, 1);
+            e.pointer_move(b.0, b.1);
+            e.pointer_up(b.0, b.1);
+        }
+        assert!(e.doc.shapes.is_empty());
+        assert_eq!(e.boxr, Some(R::new(100.0, 100.0, 100.0, 50.0)));
+        assert_eq!((e.view.ox, e.view.oy), (50.0, 25.0));
+        assert!(!e.can_undo());
+        // the wheel zooms in; then a drag moves the picture
+        e.wheel(200.0, 150.0, -1.0);
+        assert!(e.view.s > 1.0);
+        let ox = e.view.ox;
+        e.pointer_down(200.0, 150.0, 1);
+        e.pointer_move(230.0, 150.0);
+        e.pointer_up(230.0, 150.0);
+        assert!((e.view.ox - (ox + 30.0)).abs() < 0.01);
+        assert!(e.doc.shapes.is_empty());
+        // zoomed all the way out = fitted and centred again
+        for _ in 0..30 {
+            e.wheel(200.0, 150.0, 1.0);
+        }
+        assert_eq!((e.view.ox, e.view.oy, e.view.s), (50.0, 25.0, 1.0));
+        // Crop: the whole screen with the box again
+        e.key(&k("c"));
+        assert!(!e.only_box());
+        e.key(&k("Escape"));
+        // an arrow drawn, closed (its steps kept), opened again: Ctrl+Z takes it away
+        e.key(&k("a"));
+        e.pointer_down(160.0, 130.0, 1);
+        e.pointer_move(240.0, 170.0);
+        e.pointer_up(240.0, 170.0);
+        assert_eq!(e.doc.shapes.len(), 1);
+        let (shapes, hist) = (e.doc.shapes.clone(), e.history());
+        let mut again = open(shapes, hist);
+        assert_eq!(again.doc.shapes.len(), 1);
+        again.key(&ck("z"));
+        assert!(again.doc.shapes.is_empty());
+    }
+
     fn pick(e: &mut Editor) {
         e.pointer_down(50.0, 40.0, 1);
         e.pointer_move(150.0, 120.0);
@@ -1938,5 +2086,42 @@ mod tests {
         e.pointer_up(200.0, 180.0);
         assert_eq!(e.undo.len(), steps);
         assert!(e.can_redo(), "redo survives a click");
+    }
+
+    #[test]
+    fn one_box_across_two_monitors() {
+        // one capture over two monitors side by side (picture 400 x 300: left 200 x 300, right 200 x 200 at x 200)
+        let mut e = ed();
+        e.screens = vec![R::new(0.0, 0.0, 200.0, 300.0), R::new(200.0, 0.0, 200.0, 200.0)];
+        // a drag from the left monitor into the right one = one box over both
+        e.pointer_down(150.0, 40.0, 1);
+        e.pointer_move(260.0, 120.0);
+        e.pointer_up(260.0, 120.0);
+        assert_eq!(e.box_ir(), Some(IR { x: 150, y: 40, w: 110, h: 80 }));
+        // an arrow across the seam
+        e.key(&k("a"));
+        e.pointer_down(160.0, 60.0, 1);
+        e.pointer_move(250.0, 100.0);
+        e.pointer_up(250.0, 100.0);
+        assert_eq!(e.doc.shapes.len(), 1);
+        // the whole screen = the monitor under the mouse, not the whole picture
+        e.pointer_move(300.0, 100.0);
+        e.action("whole_screen");
+        assert_eq!(e.box_ir(), Some(IR { x: 200, y: 0, w: 200, h: 200 }));
+        // Screen mode with the mouse on the left one; between the monitors (under the shorter one) = the nearest
+        let mut e = ed();
+        e.screens = vec![R::new(0.0, 0.0, 200.0, 300.0), R::new(200.0, 0.0, 200.0, 200.0)];
+        e.pointer_move(50.0, 50.0);
+        e.set_mode(Mode::Screen);
+        assert_eq!(e.box_ir(), Some(IR { x: 0, y: 0, w: 200, h: 300 }));
+        e.mouse = (390.0, 260.0);
+        assert_eq!(e.screen_rect(), R::new(200.0, 0.0, 200.0, 200.0));
+        // Window mode: a click on the desktop takes that monitor
+        let mut e = ed();
+        e.screens = vec![R::new(0.0, 0.0, 200.0, 300.0), R::new(200.0, 0.0, 200.0, 200.0)];
+        e.set_mode(Mode::Window);
+        e.pointer_down(250.0, 50.0, 1);
+        e.pointer_up(250.0, 50.0);
+        assert_eq!(e.box_ir(), Some(IR { x: 200, y: 0, w: 200, h: 200 }));
     }
 }

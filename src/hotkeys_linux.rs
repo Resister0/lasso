@@ -22,9 +22,9 @@ const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 const IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 const APP_ID: &str = "link.sonela.Lasso";
 /// Never rename: KDE remembers the user's keys by id. Same order as config hk.<id>.
-pub const IDS: [&str; N] = ["region", "full", "window", "repeat", "restore"];
-pub const WHAT: [&str; N] = ["Capture an area", "Full screenshot", "Capture a window", "Repeat the last box", "Restore the last capture"];
-const N: usize = 5;
+pub const IDS: [&str; N] = ["region", "full", "window", "repeat", "restore", "delete"];
+pub const WHAT: [&str; N] = ["Capture an area", "Full screenshot", "Capture a window", "Repeat the last box", "Restore the last capture", "Delete the last capture"];
+pub const N: usize = 6;
 
 struct Shared {
     keys: [String; N],

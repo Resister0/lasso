@@ -41,6 +41,9 @@ pub struct State {
     /// the text in the picture (OCR in the background, when OCR works) - the library's search
     #[serde(default)]
     pub text: String,
+    /// the undo steps (box + shapes, oldest first): Ctrl+Z still works after the picture is opened again (22 Nov 2026)
+    #[serde(default)]
+    pub history: Vec<(Option<R>, Vec<Shape>)>,
 }
 
 pub struct Item {
@@ -66,6 +69,10 @@ pub fn new_id() -> String {
 }
 
 /// Writes (or rewrites) a capture. Slow parts (PNG) - call from a worker thread.
+/// thumb.png made by export::tile_thumb (22 Nov 2026: bigger tiles); without this file next to it it's an older,
+/// smaller one and the library makes it again when it shows it
+pub const THUMB_MARK: &str = "thumb.v2";
+
 pub fn store(id: &str, base: &Pic, base_dirty: bool, st: &State, images: &HashMap<String, Arc<Pic>>, thumb: Option<&Pic>) -> Result<(), String> {
     let d = dir(id);
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
@@ -81,7 +88,8 @@ pub fn store(id: &str, base: &Pic, base_dirty: bool, st: &State, images: &HashMa
         st.images.insert(k.clone(), f);
     }
     if let Some(t) = thumb {
-        crate::export::write_new(&d.join("thumb.png"), &crate::export::png(&crate::export::thumbnail(t, 256), true))?;
+        crate::export::write_new(&d.join("thumb.png"), &crate::export::png(&crate::export::tile_thumb(t), true))?;
+        let _ = std::fs::write(d.join(THUMB_MARK), b"");
     }
     let json = serde_json::to_string_pretty(&st).map_err(|e| e.to_string())?;
     crate::export::write_new(&d.join("state.json"), json.as_bytes())

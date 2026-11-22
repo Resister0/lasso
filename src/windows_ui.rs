@@ -5,7 +5,7 @@ use crate::app::OutInfo;
 use crate::config::Config;
 use crate::keys;
 use crate::library;
-use crate::{HkRow, KeyBind, LibGroup, LibItem, LibraryWindow, SettingsWindow, ToolToggle, T};
+use crate::{HkRow, KeyBind, LassoWindow, LibGroup, LibItem, ToolToggle, LL, SS, T};
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
@@ -110,34 +110,47 @@ fn win_act<C: ComponentHandle + 'static>(c: &C, what: &str, set_max: impl Fn(boo
 }
 
 /// Light colours for the normal windows (the dark ones are theme.slint's defaults)
+/// The theme's colours into the window (every colour every time: Light -> Dark in an open window must go dark again)
 fn apply_theme(t: &T, cfg: &Config) {
-    let (a, a2, a3) = cfg.accent();
-    t.set_accent(crate::config::color(a));
-    t.set_accent2(crate::config::color(a2));
-    t.set_g0(crate::config::color(a2));
-    t.set_g1(crate::config::color(a));
-    t.set_g2(crate::config::color(a3));
-    // both palettes set every time: Light -> Dark in an open window must go dark again (found headless, 13 Nov 2026)
-    let [bg, rail, panel, panel2, line, hover, text, muted, dim] = palette(cfg.dark());
-    let col = |h: u32| slint::Color::from_rgb_u8((h >> 16) as u8, (h >> 8) as u8, h as u8);
-    t.set_bg(col(bg));
-    t.set_rail(col(rail));
-    t.set_panel(col(panel));
-    t.set_panel2(col(panel2));
-    t.set_line(col(line));
-    t.set_hover(col(hover));
-    t.set_text(col(text));
-    t.set_muted(col(muted));
-    t.set_dim(col(dim));
+    let p = cfg.palette();
+    let col = crate::config::color;
+    t.set_accent(col(p.accent));
+    t.set_accent2(col(p.accent2));
+    t.set_on_accent(col(p.on_accent));
+    t.set_g0(col(p.grad[0]));
+    t.set_g1(col(p.grad[1]));
+    t.set_g2(col(p.grad[2]));
+    t.set_bg(col(p.bg));
+    t.set_rail(col(p.rail));
+    t.set_panel(col(p.panel));
+    t.set_panel2(col(p.panel2));
+    t.set_line(col(p.line));
+    t.set_hover(col(p.hover));
+    t.set_text(col(p.text));
+    t.set_muted(col(p.muted));
+    t.set_dim(col(p.dim));
 }
 
-/// bg, rail, panel, panel2, line, hover, text, muted, dim (dark = theme.slint's defaults)
-fn palette(dark: bool) -> [u32; 9] {
-    if dark {
-        [0x0d0d10, 0x0a0a0c, 0x16161a, 0x1e1e23, 0x26262c, 0x34343c, 0xf5f5f7, 0xa0a0ab, 0x6b6b76]
-    } else {
-        [0xf5f5f2, 0xecece8, 0xffffff, 0xf0f0ed, 0xdcdcd6, 0xe4e4de, 0x111317, 0x5d636b, 0x9aa0a8]
-    }
+/// The theme cards for Settings > General > Look (Echo's / Aimdot's grid)
+fn theme_cards(c: &Config) -> ModelRc<crate::ThemeCard> {
+    let cur = c.theme_id();
+    let dark = crate::platform_theme_dark();
+    let col = crate::config::color;
+    let v: Vec<crate::ThemeCard> = crate::theme::list()
+        .into_iter()
+        .map(|(id, name)| {
+            let p = crate::theme::palette(id, c.get("ui_accent"), c.get("ui_bg"), || !dark);
+            crate::ThemeCard { id: sh(id), name: sh(name), on: id == cur, bg: col(p.bg), rail: col(p.rail), panel: col(p.panel), accent: col(p.accent), text: col(p.text) }
+        })
+        .collect();
+    ModelRc::new(VecModel::from(v))
+}
+
+/// The window says it's Lasso (Wayland app_id = the .desktop file's name): KDE's alt-tab / task bar then show Lasso's
+/// icon and name, not a blank one (21 Nov 2026: "there's no Lasso icon in alt tab")
+fn set_app_id() {
+    #[cfg(target_os = "linux")]
+    let _ = slint::set_xdg_app_id(crate::desktop::APP_ID);
 }
 
 fn tell(cmd: &str) {
@@ -156,49 +169,55 @@ fn open_path(p: &std::path::Path) {
 // -------------------------------------------------------------------------------------------------------------
 // Settings
 
-fn fill_settings(w: &SettingsWindow, listening: &str) {
+fn fill_settings(w: &LassoWindow, listening: &str) {
     let c = Config::load();
-    w.set_version(sh(env!("CARGO_PKG_VERSION")));
-    w.set_enter_does(match c.get("enter_does") {
+    w.global::<SS>().set_version(sh(env!("CARGO_PKG_VERSION")));
+    w.global::<SS>().set_enter_does(match c.get("enter_does") {
         "save" => 1,
         "copysave" => 2,
         "link" => 3,
         _ => 0,
     });
-    w.set_always_copy(c.on("always_copy"));
-    w.set_save_dir(sh(crate::util::scrub_home(&c.save_dir().to_string_lossy())));
-    w.set_name_pattern(sh(c.get("name_pattern")));
-    w.set_name_example(sh(format!("{}.png", crate::util::name_from_pattern(c.get("name_pattern"), "Lasso"))));
-    w.set_format(match c.get("format") {
+    w.global::<SS>().set_always_copy(c.on("always_copy"));
+    w.global::<SS>().set_save_dir(sh(crate::util::scrub_home(&c.save_dir().to_string_lossy())));
+    w.global::<SS>().set_name_pattern(sh(c.get("name_pattern")));
+    w.global::<SS>().set_name_example(sh(format!("{}.png", crate::util::name_from_pattern(c.get("name_pattern"), "Lasso"))));
+    w.global::<SS>().set_format(match c.get("format") {
         "jpg" | "jpeg" => 1,
         "webp" => 2,
         _ => 0,
     });
-    w.set_fits_discord(c.on("fits_discord"));
-    w.set_accent_id(sh(c.get("accent")));
-    w.set_sounds(c.on("sounds"));
-    w.set_theme(match c.get("theme") {
-        "dark" => 1,
-        "light" => 2,
-        _ => 0,
-    });
-    w.set_autostart(c.on("autostart"));
-    w.set_delay(c.num("delay") as i32);
-    w.set_pointer(c.on("pointer"));
-    w.set_full_mode(match c.get("full_mode") {
+    w.global::<SS>().set_fits_discord(c.on("fits_discord"));
+    w.global::<SS>().set_echo_shots(c.on("echo_shots"));
+    w.global::<SS>().set_echo_dir(sh(crate::echo_link::shots_dir().map(|d| crate::util::scrub_home(&d.to_string_lossy())).unwrap_or_default()));
+    w.global::<SS>().set_theme_cards(theme_cards(&c));
+    w.global::<SS>().set_theme_id(sh(c.theme_id()));
+    w.global::<SS>().set_ui_accent(sh(c.get("ui_accent")));
+    w.global::<SS>().set_ui_bg(sh(c.get("ui_bg")));
+    w.global::<SS>().set_sounds(c.on("sounds"));
+    w.global::<SS>().set_autostart(c.on("autostart"));
+    w.global::<SS>().set_delay(c.num("delay") as i32);
+    w.global::<SS>().set_pointer(c.on("pointer"));
+    w.global::<SS>().set_full_mode(match c.get("full_mode") {
         "all" => 1,
         n => n.parse::<i32>().map(|n| (n + 1).clamp(2, 4)).unwrap_or(0),
     });
-    w.set_thumb_after_full(c.on("thumb_after_full"));
-    w.set_remember_tool(c.on("remember_tool"));
-    w.set_magnifier(c.on("magnifier"));
-    w.set_usage_ping(c.on("usage_ping"));
-    w.set_library_keep(match c.get("library_keep") {
+    w.global::<SS>().set_thumb_after_full(c.on("thumb_after_full"));
+    w.global::<SS>().set_remember_tool(c.on("remember_tool"));
+    w.global::<SS>().set_magnifier(c.on("magnifier"));
+    let on = crate::keys::bar_list(c.get("bar"));
+    let chip = |id: &str| ToolToggle { id: sh(id), name: sh(crate::keys::bar_text(id)), on: true };
+    w.global::<SS>().set_bar_on(ModelRc::new(VecModel::from(on.iter().map(|id| chip(id)).collect::<Vec<_>>())));
+    w.global::<SS>().set_bar_off(ModelRc::new(VecModel::from(
+        crate::keys::BAR_ACTIONS.iter().filter(|(id, _)| !on.contains(id)).map(|(id, _)| ToolToggle { on: false, ..chip(id) }).collect::<Vec<_>>(),
+    )));
+    w.global::<SS>().set_usage_ping(c.on("usage_ping"));
+    w.global::<SS>().set_library_keep(match c.get("library_keep") {
         "all" => 1,
         "none" => 2,
         _ => 0,
     });
-    w.set_edits_as_copy(c.on("edits_as_copy"));
+    w.global::<SS>().set_edits_as_copy(c.on("edits_as_copy"));
     // keys
     let km = c.keymap();
     let clashes = km.clashes();
@@ -211,36 +230,36 @@ fn fill_settings(w: &SettingsWindow, listening: &str) {
             clash: clashes.iter().any(|(_, a, b)| a == id || b == id),
         })
         .collect();
-    w.set_binds(ModelRc::new(VecModel::from(binds)));
-    w.set_clash_text(sh(if clashes.is_empty() {
+    w.global::<SS>().set_binds(ModelRc::new(VecModel::from(binds)));
+    w.global::<SS>().set_clash_text(sh(if clashes.is_empty() {
         String::new()
     } else {
         clashes.iter().map(|(k, a, b)| format!("{} is on both \"{}\" and \"{}\"", keys::pretty(k), keys::action_name(a), keys::action_name(b))).collect::<Vec<_>>().join(" · ")
     }));
-    w.set_listening(sh(listening));
+    w.global::<SS>().set_listening(sh(listening));
     // hotkeys
-    w.set_hotkeys_on(c.on("hotkeys"));
+    w.global::<SS>().set_hotkeys_on(c.on("hotkeys"));
     let kde: std::collections::HashMap<String, String> = std::fs::read_to_string(crate::paths::config_dir().join("kde_keys.txt"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| l.split_once('=').map(|(a, b)| (a.to_string(), b.to_string())))
         .collect();
-    let names = [("region", "Capture an area"), ("full", "Full screenshot"), ("window", "Capture a window"), ("repeat", "Repeat the last box"), ("restore", "Restore the last capture")];
+    let names = [("region", "Capture an area"), ("full", "Full screenshot"), ("window", "Capture a window"), ("repeat", "Repeat the last box"), ("restore", "Restore the last capture"), ("delete", "Delete the last capture")];
     let hks: Vec<HkRow> = names
         .iter()
         .map(|(id, n)| HkRow { id: sh(*id), name: sh(*n), key: sh(c.get(&format!("hk.{id}"))), kde: sh(kde.get(*id).cloned().unwrap_or_default()) })
         .collect();
-    w.set_hotkeys(ModelRc::new(VecModel::from(hks)));
-    w.set_hk_note(sh(kde.get("error").map(|e| format!("Not working yet: {e}")).unwrap_or_default()));
+    w.global::<SS>().set_hotkeys(ModelRc::new(VecModel::from(hks)));
+    w.global::<SS>().set_hk_note(sh(kde.get("error").map(|e| format!("Not working yet: {e}")).unwrap_or_default()));
     // library
-    w.set_keep_count(c.num("keep_count") as f32);
-    w.set_keep_days(c.num("keep_days") as f32);
-    w.set_link_expiry(c.num("link_expiry") as i32);
-    w.set_share_on(c.on("share_on"));
-    w.set_share_email(sh(crate::share::signed_in().unwrap_or_default()));
-    w.set_share_check(c.on("share_check"));
-    w.set_share_both(c.get("share_copy") == "both");
-    w.set_share_once(c.on("share_once"));
+    w.global::<SS>().set_keep_count(c.num("keep_count") as f32);
+    w.global::<SS>().set_keep_days(c.num("keep_days") as f32);
+    w.global::<SS>().set_link_expiry(c.num("link_expiry") as i32);
+    w.global::<SS>().set_share_on(c.on("share_on"));
+    w.global::<SS>().set_share_email(sh(crate::share::signed_in().unwrap_or_default()));
+    w.global::<SS>().set_share_check(c.on("share_check"));
+    w.global::<SS>().set_share_both(c.get("share_copy") == "both");
+    w.global::<SS>().set_share_once(c.on("share_once"));
     let hidden: Vec<&str> = c.get("hidden_tools").split(',').map(|s| s.trim()).collect();
     let tt: Vec<ToolToggle> = c
         .tool_order()
@@ -248,8 +267,8 @@ fn fill_settings(w: &SettingsWindow, listening: &str) {
         .filter(|t| **t != crate::shapes::Tool::Select)
         .map(|t| ToolToggle { id: sh(t.id()), name: sh(t.name()), on: !hidden.contains(&t.id()) })
         .collect();
-    w.set_tool_toggles(ModelRc::new(VecModel::from(tt)));
-    w.set_folder_note(sh(format!("Captures are kept in {} (never uploaded).", crate::util::scrub_home(&crate::paths::library_dir().to_string_lossy()))));
+    w.global::<SS>().set_tool_toggles(ModelRc::new(VecModel::from(tt)));
+    w.global::<SS>().set_folder_note(sh(format!("Captures are kept in {} (never uploaded).", crate::util::scrub_home(&crate::paths::library_dir().to_string_lossy()))));
 }
 
 thread_local! {
@@ -257,28 +276,33 @@ thread_local! {
 }
 
 /// Sign-in for share links (email -> 6-digit code), sign-out. The network calls run on a worker thread.
-fn share_act(w: &SettingsWindow, a: &str) {
+fn share_act(w: &LassoWindow, a: &str) {
     let ww = w.as_weak();
     let done = move |msg: String, code_step: Option<bool>| {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(w) = ww.upgrade() {
-                w.set_share_busy(false);
-                w.set_share_msg(sh(msg));
+                w.global::<SS>().set_share_busy(false);
+                w.global::<SS>().set_share_msg(sh(msg));
                 if let Some(c) = code_step {
-                    w.set_share_code_step(c);
+                    // the code step / signed in / out: the box is empty again (the user, 22 Nov 2026: "code sent,
+                    // input it... where?" - it still held the email)
+                    if c != w.global::<SS>().get_share_code_step() || !c {
+                        w.global::<SS>().set_share_input(sh(""));
+                    }
+                    w.global::<SS>().set_share_code_step(c);
                 }
                 fill_settings(&w, "");
             }
         });
     };
-    w.set_share_busy(true);
-    w.set_share_msg(sh("..."));
+    w.global::<SS>().set_share_busy(true);
+    w.global::<SS>().set_share_msg(sh("..."));
     let cfg = Config::load();
     if let Some(email) = a.strip_prefix("share-send:") {
         let email = email.trim().to_string();
         std::thread::spawn(move || match crate::share::sign_in_start(&cfg, &email) {
             Ok(clean) => {
-                let m = format!("Code sent to {clean} - type it here");
+                let m = format!("Code sent to {clean} - type the 6 digits in the box above");
                 let _ = slint::invoke_from_event_loop(move || SHARE_EMAIL.with(|e| *e.borrow_mut() = clean));
                 done(m, Some(true))
             }
@@ -297,7 +321,7 @@ fn share_act(w: &SettingsWindow, a: &str) {
             done("Signed out".into(), Some(false))
         });
     } else {
-        w.set_share_busy(false);
+        w.global::<SS>().set_share_busy(false);
     }
 }
 
@@ -312,6 +336,10 @@ fn set_key(k: &str, v: &str) {
     } else {
         c.set(k, v);
     }
+    // a theme picked: the old accent setting (before the theme cards) must not map it to another theme
+    if k == "theme" {
+        c.set("accent", "");
+    }
     if k == "autostart" {
         #[cfg(target_os = "linux")]
         crate::desktop::set_autostart(v == "1");
@@ -323,32 +351,32 @@ fn set_key(k: &str, v: &str) {
 }
 
 /// Settings > About > Updates (src/update.rs fills it; keep the Updater as long as the window)
-fn settings_updater(w: &SettingsWindow) -> std::sync::Arc<crate::update::Updater> {
+fn settings_updater(w: &LassoWindow) -> std::sync::Arc<crate::update::Updater> {
     let ww = w.as_weak();
     crate::update::start_window(std::sync::Arc::new(move |v: crate::update::View| {
         let _ = ww.upgrade_in_event_loop(move |w| {
-            w.set_upd_available(v.available);
-            w.set_upd_version(sh(v.version));
-            w.set_upd_notes(sh(v.notes));
-            w.set_upd_status(sh(v.status));
-            w.set_upd_button(sh(v.button));
-            w.set_upd_busy(v.busy);
-            w.set_upd_can_check(v.can_check);
+            w.global::<SS>().set_upd_available(v.available);
+            w.global::<SS>().set_upd_version(sh(v.version));
+            w.global::<SS>().set_upd_notes(sh(v.notes));
+            w.global::<SS>().set_upd_status(sh(v.status));
+            w.global::<SS>().set_upd_button(sh(v.button));
+            w.global::<SS>().set_upd_busy(v.busy);
+            w.global::<SS>().set_upd_can_check(v.can_check);
+            w.global::<SS>().set_upd_channel(v.channel);
         });
     }))
 }
 
-pub fn settings_main() {
-    let w = match SettingsWindow::new() {
+/// Settings and Library in one window (21 Nov 2026), its own short-lived process: `view` 0 = Settings, 1 = Library.
+/// `--settings-window` / `--library-window` both land here.
+pub fn window_main(view: i32) {
+    set_app_id();
+    let w = match LassoWindow::new() {
         Ok(w) => w,
-        Err(e) => return eprintln!("lasso: settings window: {e}"),
+        Err(e) => return eprintln!("lasso: window: {e}"),
     };
     apply_theme(&w.global::<T>(), &Config::load());
-    if let Ok(p) = std::env::var("LASSO_PAGE") {
-        w.set_page(p.parse().unwrap_or(0));
-    }
-    fill_settings(&w, "");
-    let upd = settings_updater(&w);
+    w.set_view(view);
     let ww = w.as_weak();
     w.on_win_act(move |a| {
         if let Some(w) = ww.upgrade() {
@@ -360,10 +388,35 @@ pub fn settings_main() {
             });
         }
     });
+    // the settings search (Ctrl+F): every word somewhere in the text, any case (Echo's / Aimdot's Find)
+    w.global::<crate::Find>().on_matches(|q, text| {
+        let t = text.to_lowercase();
+        q.to_lowercase().split_whitespace().all(|w| t.contains(w))
+    });
+    setup_settings(&w);
+    let _timer = setup_library(&w);
+    let _ = w.run();
+}
+
+fn setup_settings(w: &LassoWindow) {
+    // tests: open at a section - its name ("appearance") or an old page number (2 = editor keys)
+    if let Ok(p) = std::env::var("LASSO_PAGE") {
+        let sec = match p.as_str() {
+            "0" | "1" => "capture",
+            "2" => "keys",
+            "3" => "hotkeys",
+            "4" => "library",
+            "5" => "about",
+            s => s,
+        };
+        w.global::<SS>().set_sec(sh(sec.to_string()));
+    }
+    fill_settings(w, "");
+    let upd = settings_updater(w);
     let ww = w.as_weak();
-    w.on_set(move |k, v| {
+    w.global::<SS>().on_set(move |k, v| {
         set_key(&k, &v);
-        if k.as_str() == "accent" || k.as_str() == "theme" {
+        if matches!(k.as_str(), "accent" | "theme" | "ui_accent" | "ui_bg") {
             if let Some(w) = ww.upgrade() {
                 apply_theme(&w.global::<T>(), &Config::load());
             }
@@ -373,20 +426,20 @@ pub fn settings_main() {
             if k.as_str() != "name_pattern" {
                 fill_settings(&w, "");
             } else {
-                w.set_name_example(sh(format!("{}.png", crate::util::name_from_pattern(&v, "Lasso"))));
+                w.global::<SS>().set_name_example(sh(format!("{}.png", crate::util::name_from_pattern(&v, "Lasso"))));
             }
         }
     });
     let ww = w.as_weak();
-    w.on_listen(move |id| {
+    w.global::<SS>().on_listen(move |id| {
         if let Some(w) = ww.upgrade() {
-            w.set_listening(id);
+            w.global::<SS>().set_listening(id);
         }
     });
     let ww = w.as_weak();
-    w.on_key_captured(move |text, ctrl, shift, alt| {
+    w.global::<SS>().on_key_captured(move |text, ctrl, shift, alt| {
         let Some(w) = ww.upgrade() else { return false };
-        let id = w.get_listening().to_string();
+        let id = w.global::<SS>().get_listening().to_string();
         let ev = keys::from_slint(&text, ctrl, alt, shift, false, None);
         if ev.key.starts_with("Shift") || ev.key.starts_with("Control") || ev.key.starts_with("Alt") {
             return true;
@@ -429,9 +482,18 @@ pub fn settings_main() {
         true
     });
     let ww = w.as_weak();
-    w.on_act(move |a| {
+    w.global::<SS>().on_act(move |a| {
         let Some(w) = ww.upgrade() else { return };
+        if let Some(rest) = a.strip_prefix("bar:") {
+            // "bar:add:pin" / remove / left / right -> the new order in config `bar`, the overlay reloads it
+            let (op, id) = rest.split_once(':').unwrap_or((rest, ""));
+            let v = crate::keys::bar_edit(Config::load().get("bar"), op, id);
+            set_key("bar", &v);
+            fill_settings(&w, "");
+            return;
+        }
         match a.as_str() {
+            "library" => w.set_view(1),
             "pick-folder" => {
                 let dir = Config::load().save_dir();
                 let w2 = w.as_weak();
@@ -480,6 +542,21 @@ pub fn settings_main() {
             "open-log" => open_path(&crate::paths::config_dir()),
             "upd-check" => upd.check(true, |_| {}),
             "upd-install" => upd.install(),
+            // update channel (21 Nov 2026): Stable / Beta at once; Dev after sonela.app said the code is right
+            a if a.starts_with("upd-channel:") => upd.set_channel(a["upd-channel:".len()..].parse().unwrap_or(0)),
+            a if a.starts_with("upd-code:") => {
+                let ww = ww.clone();
+                upd.dev_code(a["upd-code:".len()..].to_string(), move |msg| {
+                    let _ = ww.upgrade_in_event_loop(move |w| {
+                        let g = w.global::<SS>();
+                        g.set_upd_code_busy(false);
+                        if msg.is_empty() {
+                            g.set_upd_asking_code(false);
+                        }
+                        g.set_upd_code_msg(msg.into());
+                    });
+                });
+            }
             a if a.starts_with("share-") => share_act(&w, a),
             "system-keys" => {
                 // KDE: System Settings > Keyboard > Shortcuts; Windows: the "Print screen key opens screen capture" page
@@ -496,7 +573,6 @@ pub fn settings_main() {
             _ => {}
         }
     });
-    let _ = w.run();
 }
 
 // -------------------------------------------------------------------------------------------------------------
@@ -539,7 +615,7 @@ fn day_title(t: i64) -> String {
     }
 }
 
-fn fill_library(w: &LibraryWindow, lib: &Lib) {
+fn fill_library(w: &LassoWindow, lib: &Lib) {
     let mut groups: Vec<LibGroup> = vec![];
     let mut cur: Option<(String, Vec<LibItem>)> = None;
     let shared = crate::share::shared_captures();
@@ -578,12 +654,12 @@ fn fill_library(w: &LibraryWindow, lib: &Lib) {
     if let Some((t, v)) = cur.take() {
         groups.push(LibGroup { title: sh(t), items: ModelRc::new(VecModel::from(v)) });
     }
-    w.set_empty(empty);
-    w.set_searching(!lib.query.trim().is_empty());
-    w.set_group_by(lib.by_app as i32);
-    w.set_count(sh(format!("{} picture{}", lib.items.len(), if lib.items.len() == 1 { "" } else { "s" })));
-    w.set_selected(lib.sel.len() as i32);
-    w.set_groups(ModelRc::new(VecModel::from(groups)));
+    w.global::<LL>().set_empty(empty);
+    w.global::<LL>().set_searching(!lib.query.trim().is_empty());
+    w.global::<LL>().set_group_by(lib.by_app as i32);
+    w.global::<LL>().set_count(sh(format!("{} picture{}", lib.items.len(), if lib.items.len() == 1 { "" } else { "s" })));
+    w.global::<LL>().set_selected(lib.sel.len() as i32);
+    w.global::<LL>().set_groups(ModelRc::new(VecModel::from(groups)));
 }
 
 thread_local! {
@@ -592,9 +668,9 @@ thread_local! {
 
 /// Changes the shown tiles in place (selection, thumbnails): rebuilding the model would make new tiles under the
 /// mouse, and a double-click would never reach one tile twice.
-fn patch_tiles(w: &LibraryWindow, lib: &Lib) {
+fn patch_tiles(w: &LassoWindow, lib: &Lib) {
     use slint::Model;
-    let groups = w.get_groups();
+    let groups = w.global::<LL>().get_groups();
     for gi in 0..groups.row_count() {
         let Some(g) = groups.row_data(gi) else { continue };
         for ii in 0..g.items.row_count() {
@@ -612,11 +688,11 @@ fn patch_tiles(w: &LibraryWindow, lib: &Lib) {
             }
         }
     }
-    w.set_selected(lib.sel.len() as i32);
+    w.global::<LL>().set_selected(lib.sel.len() as i32);
 }
 
-/// Thumbnails in the background (256 px; plain files get a cached one in the library's .thumbs folder)
-fn load_thumbs(w: &LibraryWindow, items: Vec<(String, std::path::PathBuf, bool)>) {
+/// Thumbnails in the background (export::tile_thumb; plain files get a cached one in the library's .thumbs folder)
+fn load_thumbs(w: &LassoWindow, items: Vec<(String, std::path::PathBuf, bool)>) {
     if items.is_empty() {
         return;
     }
@@ -628,14 +704,30 @@ fn load_thumbs(w: &LibraryWindow, items: Vec<(String, std::path::PathBuf, bool)>
         let n = items.len();
         for (i, (key, path, lib)) in items.into_iter().enumerate() {
             let pic = if lib {
-                std::fs::read(&path).ok().and_then(|b| crate::export::decode(&b).ok())
+                let p = std::fs::read(&path).ok().and_then(|b| crate::export::decode(&b).ok());
+                // a thumb from before 22 Nov 2026 (256 px) is too soft for the bigger tiles: made again from the picture
+                let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+                match p {
+                    Some(t) if !dir.join(library::THUMB_MARK).exists() => {
+                        let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        match library::finished(&id).map(|f| crate::export::tile_thumb(&f)) {
+                            Ok(big) => {
+                                let _ = crate::export::write_new(&path, &crate::export::png(&big, true));
+                                let _ = std::fs::write(dir.join(library::THUMB_MARK), b"");
+                                Some(big)
+                            }
+                            _ => Some(t),
+                        }
+                    }
+                    p => p,
+                }
             } else {
                 let stamp = std::fs::metadata(&path).ok().map(|m| (m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0))).unwrap_or((0, 0));
-                let cp = cache.join(format!("{:x}.png", fnv(&format!("{key}|{}|{}", stamp.0, stamp.1))));
+                let cp = cache.join(format!("{:x}.png", fnv(&format!("{key}|{}|{}|tile", stamp.0, stamp.1))));
                 match std::fs::read(&cp).ok().and_then(|b| crate::export::decode(&b).ok()) {
                     Some(p) => Some(p),
                     None => {
-                        let p = std::fs::read(&path).ok().and_then(|b| crate::export::decode(&b).ok()).map(|p| crate::export::thumbnail(&p, 256));
+                        let p = std::fs::read(&path).ok().and_then(|b| crate::export::decode(&b).ok()).map(|p| crate::export::tile_thumb(&p));
                         if let Some(p) = &p {
                             let _ = std::fs::write(&cp, crate::export::png(p, true));
                         }
@@ -684,7 +776,7 @@ fn prune_thumb_cache(items: &[library::Item]) {
         .map(|it| {
             let k = key_of(it);
             let stamp = std::fs::metadata(&it.path).ok().map(|m| (m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0))).unwrap_or((0, 0));
-            format!("{:x}.png", fnv(&format!("{k}|{}|{}", stamp.0, stamp.1)))
+            format!("{:x}.png", fnv(&format!("{k}|{}|{}|tile", stamp.0, stamp.1)))
         })
         .collect();
     if let Ok(rd) = std::fs::read_dir(crate::paths::library_dir().join(".thumbs")) {
@@ -696,7 +788,7 @@ fn prune_thumb_cache(items: &[library::Item]) {
     }
 }
 
-fn refresh(w: &LibraryWindow, lib: &Rc<RefCell<Lib>>) {
+fn refresh(w: &LassoWindow, lib: &Rc<RefCell<Lib>>) {
     let items = library::list(&Config::load().save_dir());
     prune_thumb_cache(&items);
     let todo: Vec<(String, std::path::PathBuf, bool)> = {
@@ -743,7 +835,7 @@ fn delete_item(key: &str, is_lib: bool) -> Result<usize, String> {
 
 /// Delete from the Library (one or many). A shared capture's public link is stopped FIRST (network, own thread) and
 /// the capture goes only when that worked - else a "never" link would stay public with no way to stop it (review D1).
-fn delete_keys(w: &LibraryWindow, lib: &Rc<RefCell<Lib>>, keys: Vec<(String, bool)>) {
+fn delete_keys(w: &LassoWindow, lib: &Rc<RefCell<Lib>>, keys: Vec<(String, bool)>) {
     let (shared, plain): (Vec<_>, Vec<_>) = keys.into_iter().partition(|(k, is_lib)| *is_lib && crate::share::link_of(k).is_some());
     let (mut n, mut with_saved, mut err) = (0, false, None);
     for (k, is_lib) in &plain {
@@ -803,25 +895,25 @@ fn delete_keys(w: &LibraryWindow, lib: &Rc<RefCell<Lib>>, keys: Vec<(String, boo
     });
 }
 
-fn lib_toast(w: &LibraryWindow, t: &str) {
-    w.set_toast(sh(t));
+fn lib_toast(w: &LassoWindow, t: &str) {
+    w.global::<LL>().set_toast(sh(t));
     let ww = w.as_weak();
     slint::Timer::single_shot(std::time::Duration::from_millis(2200), move || {
         if let Some(w) = ww.upgrade() {
-            w.set_toast(sh(""));
+            w.global::<LL>().set_toast(sh(""));
         }
     });
 }
 
 thread_local! {
-    static LIB_WIN: RefCell<Option<slint::Weak<LibraryWindow>>> = const { RefCell::new(None) };
+    static LIB_WIN: RefCell<Option<slint::Weak<LassoWindow>>> = const { RefCell::new(None) };
 }
 
 /// A drag with files is over the library (Wayland: wl_dnd.rs; Windows / X11: winit)
 pub fn lib_drag_over(on: bool) {
     LIB_WIN.with(|w| {
         if let Some(w) = w.borrow().as_ref().and_then(|w| w.upgrade()) {
-            w.set_drag_over(on);
+            w.global::<LL>().set_drag_over(on);
         }
     });
 }
@@ -863,12 +955,8 @@ pub fn lib_dropped(paths: Vec<std::path::PathBuf>) {
     });
 }
 
-pub fn library_main() {
-    let w = match LibraryWindow::new() {
-        Ok(w) => w,
-        Err(e) => return eprintln!("lasso: library window: {e}"),
-    };
-    apply_theme(&w.global::<T>(), &Config::load());
+/// The Library page's setup; the returned timer (new captures show up) lives as long as the window
+fn setup_library(w: &LassoWindow) -> slint::Timer {
     let lib = Rc::new(RefCell::new(Lib { items: vec![], sel: vec![], thumbs: Default::default(), query: String::new(), by_app: Config::load().get("library_group") == "app" }));
     LIB.with(|l| *l.borrow_mut() = Some(lib.clone()));
     LIB_WIN.with(|l| *l.borrow_mut() = Some(w.as_weak()));
@@ -887,27 +975,16 @@ pub fn library_main() {
             EventResult::Propagate
         });
     }
-    refresh(&w, &lib);
-    let ww = w.as_weak();
-    w.on_win_act(move |a| {
-        if let Some(w) = ww.upgrade() {
-            let w2 = w.as_weak();
-            win_act(&w, &a, move |m| {
-                if let Some(w) = w2.upgrade() {
-                    w.set_win_max(m)
-                }
-            });
-        }
-    });
+    refresh(w, &lib);
     let (ww, l2) = (w.as_weak(), lib.clone());
-    w.on_search(move |q| {
+    w.global::<LL>().on_search(move |q| {
         if let Some(w) = ww.upgrade() {
             l2.borrow_mut().query = q.to_string();
             fill_library(&w, &l2.borrow());
         }
     });
     let (ww, l2) = (w.as_weak(), lib.clone());
-    w.on_group(move |v| {
+    w.global::<LL>().on_group(move |v| {
         if let Some(w) = ww.upgrade() {
             l2.borrow_mut().by_app = v == 1;
             let mut c = Config::load();
@@ -917,7 +994,7 @@ pub fn library_main() {
         }
     });
     let (ww, l2) = (w.as_weak(), lib.clone());
-    w.on_pick(move |key, add| {
+    w.global::<LL>().on_pick(move |key, add| {
         let Some(w) = ww.upgrade() else { return };
         let mut l = l2.borrow_mut();
         let k = key.to_string();
@@ -935,12 +1012,17 @@ pub fn library_main() {
         patch_tiles(&w, &l);
     });
     let (ww, l2) = (w.as_weak(), lib.clone());
-    w.on_act(move |a, key| {
+    w.global::<LL>().on_act(move |a, key| {
         let Some(w) = ww.upgrade() else { return };
         let key = key.to_string();
         let is_lib = l2.borrow().items.iter().any(|it| it.id == key && !key.is_empty());
         match a.as_str() {
-            "edit" => tell(&if is_lib { format!("edit:{key}") } else { format!("open:{key}") }),
+            // opened on the monitor the Library is on (the user, 22 Nov 2026: "double-clicking opens it on the 2nd
+            // monitor" - it went where the mouse last was over Lasso's own screens)
+            "edit" => {
+                let mon = w.window().with_winit_window(|ww| ww.current_monitor().and_then(|m| m.name())).flatten().unwrap_or_default();
+                tell(&format!("{}:{key}\u{1f}{mon}", if is_lib { "edit" } else { "open" }))
+            }
             "copy" => {
                 tell(&if is_lib { format!("copy-lib:{key}") } else { format!("copy-file:{key}") });
                 lib_toast(&w, "Copied");
@@ -1022,10 +1104,11 @@ pub fn library_main() {
         }
     });
     let (ww, l2) = (w.as_weak(), lib.clone());
-    w.on_bulk(move |a| {
+    w.global::<LL>().on_bulk(move |a| {
         let Some(w) = ww.upgrade() else { return };
         match a.as_str() {
             "open" => tell("open-dialog"),
+            "settings" => w.set_view(0),
             "capture" => {
                 w.window().set_minimized(true);
                 tell("region");
@@ -1068,20 +1151,19 @@ pub fn library_main() {
         }
         *l = n;
     });
-    let _ = w.run();
+    timer
 }
 
 #[cfg(test)]
 mod tests {
-    /// Light -> Dark in an open Settings window: the dark palette must be set back, and match theme.slint's defaults
+    /// The Teal theme's palette = theme.slint's defaults (the window looks the same before the theme is applied)
     #[test]
-    fn dark_palette_matches_theme_slint() {
+    fn teal_palette_matches_theme_slint() {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/theme.slint")).unwrap();
-        let names = ["bg", "rail", "panel", "panel2", "line", "hover", "text", "muted", "dim"];
-        for (n, v) in names.iter().zip(super::palette(true)) {
+        let p = crate::theme::palette("", "", "", || false);
+        for (n, v) in [("bg", p.bg), ("text", p.text), ("muted", p.muted), ("dim", p.dim), ("accent", p.accent), ("accent2", p.accent2)] {
             let line = src.lines().find(|l| l.contains(&format!("property <color> {n}:"))).unwrap();
             assert!(line.contains(&format!("#{v:06x}")), "{n}: {line}");
         }
-        assert_ne!(super::palette(true), super::palette(false));
     }
 }

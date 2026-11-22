@@ -110,6 +110,15 @@ impl Api<'_> {
         }
     }
 
+    /// No account: the device key -> a session of a hidden device account (picture links, a year at most)
+    pub fn auth_device(&self, key: &str) -> Result<String, Fail> {
+        let v = self.call("POST", "/auth/device", Some(json!({ "device": key })))?;
+        match v["token"].as_str() {
+            Some(t) if !t.is_empty() => Ok(t.to_string()),
+            _ => Err(Fail::Msg("The server didn't hand out a device key - try again".into())),
+        }
+    }
+
     pub fn logout(&self) -> Result<(), Fail> {
         self.call("POST", "/auth/logout", Some(json!({}))).map(|_| ())
     }

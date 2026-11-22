@@ -558,6 +558,7 @@ impl WlPlatform {
             xkb_state: None,
             mods: (false, false, false),
             ptr_win: None,
+            ptr_surf: None,
             ptr_serial: 0,
             ptr_pos: (0.0, 0.0),
             kb_win: None,
@@ -1158,6 +1159,9 @@ pub struct St {
     xkb_state: Option<(xkb::Keymap, xkb::State)>,
     mods: (bool, bool, bool),
     ptr_win: Option<u32>,
+    /// the surface the pointer last entered - looked up again when that enter came before Lasso knew the surface
+    /// (21 Nov 2026: "sometimes Lasso doesn't let me select on the main monitor, only the side one")
+    ptr_surf: Option<WlSurface>,
     ptr_serial: u32,
     ptr_pos: (f32, f32),
     kb_win: Option<u32>,
@@ -1229,6 +1233,20 @@ impl St {
             d.set_shape(self.ptr_serial, want);
             self.cursor_set = Some(want);
         }
+    }
+
+    /// The pointer is on a surface whose enter came too early: find its window now and tell the app it entered
+    fn resolve_ptr(&mut self) {
+        if self.ptr_win.is_some() {
+            return;
+        }
+        let Some(win) = self.ptr_surf.as_ref().and_then(|s| self.surf_of(s)) else { return };
+        self.ptr_win = Some(win);
+        let (x, y) = self.ptr_pos;
+        self.events.push(Ev::Enter { win, x, y });
+        crate::log::line("wl", "pointer surface found late - input works there now");
+        self.cursor_set = None;
+        self.apply_cursor();
     }
 
     fn surf_of(&self, s: &WlSurface) -> Option<u32> {
@@ -1386,6 +1404,10 @@ impl Dispatch<WlPointer, ()> for St {
             wl_pointer::Event::Enter { serial, surface, surface_x, surface_y } => {
                 st.ptr_serial = serial;
                 st.ptr_win = st.surf_of(&surface);
+                if st.ptr_win.is_none() {
+                    crate::log::line("wl", "pointer entered a surface Lasso doesn't know yet - looked up again on the next move");
+                }
+                st.ptr_surf = Some(surface.clone());
                 st.ptr_pos = (surface_x as f32, surface_y as f32);
                 if let Some(win) = st.ptr_win {
                     st.events.push(Ev::Enter { win, x: surface_x as f32, y: surface_y as f32 });
@@ -1394,17 +1416,23 @@ impl Dispatch<WlPointer, ()> for St {
                 st.apply_cursor();
             }
             wl_pointer::Event::Leave { .. } => {
+                st.ptr_surf = None;
                 if let Some(win) = st.ptr_win.take() {
                     st.events.push(Ev::Leave { win });
                 }
             }
             wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
                 st.ptr_pos = (surface_x as f32, surface_y as f32);
+                st.resolve_ptr();
                 if let Some(win) = st.ptr_win {
                     st.events.push(Ev::Motion { win, x: surface_x as f32, y: surface_y as f32 });
                 }
             }
             wl_pointer::Event::Button { serial, button, state, .. } => {
+                st.resolve_ptr();
+                if st.ptr_win.is_none() && state == WEnum::Value(wl_pointer::ButtonState::Pressed) {
+                    crate::log::line("wl", &format!("a click went to no Lasso window (pointer surface known: {})", st.ptr_surf.is_some()));
+                }
                 if let Some(win) = st.ptr_win {
                     let pressed = matches!(state, WEnum::Value(wl_pointer::ButtonState::Pressed));
                     if pressed {

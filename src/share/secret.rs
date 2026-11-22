@@ -83,6 +83,23 @@ pub fn private_file(p: &std::path::Path) {
     let _ = p;
 }
 
+/// 32 random bytes from the system as hex (the Lasso device key) - /dev/urandom / RtlGenRandom. None = no randomness.
+pub fn random_hex32() -> Option<String> {
+    let mut b = [0u8; 32];
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut b).ok()?;
+    }
+    #[cfg(windows)]
+    {
+        if !dpapi::random(&mut b) {
+            return None;
+        }
+    }
+    Some(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
 /// DPAPI through crypt32.dll loaded at run time (no extra windows-sys features). ⚠ untested (Windows)
 #[cfg(windows)]
 mod dpapi {
@@ -113,6 +130,16 @@ mod dpapi {
             free(out.pb as *mut core::ffi::c_void);
         }
         v
+    }
+
+    /// RtlGenRandom (advapi32 SystemFunction036), the system's random bytes. ⚠ untested (Windows)
+    pub fn random(buf: &mut [u8]) -> bool {
+        type GenFn = unsafe extern "system" fn(*mut u8, u32) -> u8;
+        unsafe {
+            let Some(f) = sym(b"advapi32.dll\0", b"SystemFunction036\0") else { return false };
+            let f: GenFn = std::mem::transmute(f);
+            f(buf.as_mut_ptr(), buf.len() as u32) != 0
+        }
     }
 
     pub fn protect(data: &[u8]) -> Option<Vec<u8>> {

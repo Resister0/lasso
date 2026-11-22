@@ -55,7 +55,8 @@ component Tile inherits Rectangle {
             width: parent.width;
             height: parent.height;
             source: root.it.thumb;
-            image-fit: contain;
+            // filled like Echo's cards (no black bars); the whole picture opens on a double-click
+            image-fit: cover;
         }
     }
     HorizontalLayout {
@@ -158,49 +159,36 @@ component Tile inherits Rectangle {
     }
 }
 
-export component LibraryWindow inherits Window {
-    title: "Lasso Library";
-    icon: @image-url("../assets/icons/lasso-64.png");
-    no-frame: true;
-    preferred-width: 980px;
-    preferred-height: 660px;
-    min-width: 520px;
-    min-height: 380px;
-    background: T.bg;
-    default-font-size: 14px;
+// Library's state (one window with Settings now, ui/lasso_window.slint)
+export global LL {
 
-    in property <bool> win-max;
-    in property <[LibGroup]> groups;
-    in property <string> count;
-    in property <int> selected;
-    in property <string> toast;
-    in property <bool> empty;
-    in property <bool> drag-over;
-    in property <int> group-by;
-    in property <bool> searching;
-    property <length> tw: 240px;
-    property <length> th: 168px;
-    property <length> gap: 12px;
-    property <int> cols: max(1, floor((root.width - 40px + root.gap) / (root.tw + root.gap)));
 
-    callback win-act(string);
+    in-out property <[LibGroup]> groups;
+    in-out property <string> count;
+    in-out property <int> selected;
+    in-out property <string> toast;
+    in-out property <bool> empty;
+    in-out property <bool> drag-over;
+    in-out property <int> group-by;
+    in-out property <bool> searching;
+
     callback act(string, string);
     callback pick(string, bool);
     callback bulk(string);
     callback search(string);
     callback group(int);
 
+}
+
+export component LibraryView inherits Rectangle {
+    // the tiles grow with the window, like Echo's cards (22 Nov 2026: "when fullscreened the previews should be larger"):
+    // as many columns as fit at 280 px, then each as wide as the row allows (at most 420 px); 16:10 pictures
+    property <length> gap: 14px;
+    property <int> cols: max(1, floor((root.width - 40px + root.gap) / (280px + root.gap)));
+    property <length> tw: min(420px, (root.width - 40px - (root.cols - 1) * root.gap) / root.cols);
+    property <length> th: (root.tw - 12px) * 0.625 + 40px;
     VerticalLayout {
-        TitleBar {
-            title: "Lasso";
-            sub: "Library · " + root.count;
-            win-max: root.win-max;
-            win-act(a) => { root.win-act(a); }
-            Btn { y: (parent.height - self.height) / 2; small: true; text: "Open a picture"; clicked => { root.bulk("open"); } }
-            Btn { y: (parent.height - self.height) / 2; small: true; primary: true; text: "Capture"; clicked => { root.bulk("capture"); } }
-            Rectangle { width: 6px; }
-        }
-        // search (the text in the pictures, app, file name) + group by day / app
+                // search (the text in the pictures, app, file name) + group by day / app
         Rectangle {
             height: 48px;
             HorizontalLayout {
@@ -235,7 +223,7 @@ export component LibraryWindow inherits Window {
                         color: T.text;
                         font-size: 13px;
                         single-line: true;
-                        edited => { root.search(self.text); }
+                        edited => { LL.search(self.text); }
                     }
                     if q.text == "": Text {
                         x: 32px;
@@ -250,8 +238,8 @@ export component LibraryWindow inherits Window {
                 Seg {
                     compact: true;
                     opts: [{ label: "Day", value: 0 }, { label: "App or game", value: 1 }];
-                    value: root.group-by;
-                    picked(v) => { root.group(v); }
+                    value: LL.group-by;
+                    picked(v) => { LL.group(v); }
                 }
             }
         }
@@ -261,13 +249,13 @@ export component LibraryWindow inherits Window {
                 padding: 20px;
                 spacing: 10px;
                 alignment: start;
-                if root.empty: Text {
-                    text: root.searching ? "Nothing found." : "Nothing here yet - your captures and the pictures in your save folder show up here.";
+                if LL.empty: Text {
+                    text: LL.searching ? "Nothing found." : "Nothing here yet - your captures and the pictures in your save folder show up here.";
                     color: T.muted;
                     font-size: 14px;
                     wrap: word-wrap;
                 }
-                for g in root.groups: VerticalLayout {
+                for g in LL.groups: VerticalLayout {
                     spacing: 8px;
                     Text { text: g.title; color: T.muted; font-size: 13px; font-weight: 600; }
                     Rectangle {
@@ -278,15 +266,15 @@ export component LibraryWindow inherits Window {
                             width: root.tw;
                             height: root.th;
                             it: it;
-                            act(a) => { root.act(a, it.key); }
-                            pick(add) => { root.pick(it.key, add); }
+                            act(a) => { LL.act(a, it.key); }
+                            pick(add) => { LL.pick(it.key, add); }
                         }
                     }
                 }
             }
         }
     }
-    if root.drag-over: Rectangle {
+    if LL.drag-over: Rectangle {
         x: 12px;
         y: 48px;
         width: root.width - 24px;
@@ -298,7 +286,7 @@ export component LibraryWindow inherits Window {
         Text { text: "Drop pictures to add them to the library"; color: T.accent2; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
     }
     // multi-select actions float at the bottom (an inserted bar would move the tiles between two clicks)
-    if root.selected > 0: Rectangle {
+    if LL.selected > 0: Rectangle {
         x: (root.width - self.width) / 2;
         y: root.height - self.height - 18px;
         width: sbl.preferred-width;
@@ -313,14 +301,14 @@ export component LibraryWindow inherits Window {
             padding-left: 18px;
             padding-right: 8px;
             spacing: 8px;
-            Text { text: root.selected + " selected"; color: T.text; font-size: 13.5px; font-weight: 600; vertical-alignment: center; }
+            Text { text: LL.selected + " selected"; color: T.text; font-size: 13.5px; font-weight: 600; vertical-alignment: center; }
             Rectangle { width: 10px; }
-            Btn { y: (parent.height - self.height) / 2; small: true; text: "Copy"; clicked => { root.bulk("copy"); } }
-            Btn { y: (parent.height - self.height) / 2; small: true; text: "Delete"; danger: true; clicked => { root.bulk("delete"); } }
-            Btn { y: (parent.height - self.height) / 2; small: true; text: "Clear"; clicked => { root.bulk("clear"); } }
+            Btn { y: (parent.height - self.height) / 2; small: true; text: "Copy"; clicked => { LL.bulk("copy"); } }
+            Btn { y: (parent.height - self.height) / 2; small: true; text: "Delete"; danger: true; clicked => { LL.bulk("delete"); } }
+            Btn { y: (parent.height - self.height) / 2; small: true; text: "Clear"; clicked => { LL.bulk("clear"); } }
         }
     }
-    if root.toast != "": Rectangle {
+    if LL.toast != "": Rectangle {
         x: (root.width - self.width) / 2;
         y: root.height - self.height - 24px;
         width: tt.preferred-width + 28px;
@@ -331,9 +319,7 @@ export component LibraryWindow inherits Window {
         border-color: T.line;
         drop-shadow-blur: 20px;
         drop-shadow-color: #00000088;
-        tt := Text { text: root.toast; color: T.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+        tt := Text { text: LL.toast; color: T.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
     }
-    Edges {
-        win-act(a) => { root.win-act(a); }
     }
-}
+

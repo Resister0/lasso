@@ -234,6 +234,14 @@ pub fn decode(bytes: &[u8]) -> Result<Pic, String> {
     Ok(Pic { w, h, px })
 }
 
+/// A library tile's picture (22 Nov 2026): big enough to FILL the largest tile (420 x 262, cropped to it) whatever
+/// its shape - a wide strip or a tall page too - but at most 900 px long
+pub fn tile_thumb(pic: &Pic) -> Pic {
+    let s = (420.0 / pic.w as f32).max(262.0 / pic.h as f32).min(1.0);
+    let long = (pic.w.max(pic.h) as f32 * s).min(900.0);
+    thumbnail(pic, long.round() as u32)
+}
+
 pub fn thumbnail(pic: &Pic, max: u32) -> Pic {
     let s = (max as f32 / pic.w.max(pic.h) as f32).min(1.0);
     let (w, h) = (((pic.w as f32 * s).round() as u32).max(1), ((pic.h as f32 * s).round() as u32).max(1));

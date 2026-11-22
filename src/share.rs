@@ -1,6 +1,7 @@
 //! Share links (Ctrl+L / Enter = link / the Link button) - `sonela.app/s/<id>` (notes `LASSO_SHARE_PLAN.md`).
 //!
-//! BEHIND A SWITCH: config `share_on=0` until the server part is deployed (`notes/server-patches/`). Off = nothing
+//! A SWITCH: config `share_on` (on by default since 21 Nov 2026, the server part is live). No account = a device key
+//! (`token_or_device`, links last a year at most); signed in = the Echo Cloud account. Off = nothing
 //! here talks to a server. On = before every upload or sign-in Lasso asks `GET /health` whether the server
 //! knows Lasso (`"lasso": 1`); an older server = "needs the Sonela server update first", nothing uploaded.
 //!
@@ -34,7 +35,7 @@ use std::time::{Duration, Instant};
 /// The Echo Cloud server (also the API for sonela.app links). `LASSO_SHARE_API` / config `share_api` override it.
 pub const API_DEFAULT: &str = "https://echoclip.link";
 /// Link expiry choices in days (0 = never); the default comes from config `link_expiry` (30)
-pub const EXPIRY_CHOICES: [u32; 4] = [1, 7, 30, 0];
+pub const EXPIRY_CHOICES: [u32; 5] = [1, 7, 30, 365, 0];
 /// A privacy warning is remembered this long: pressing Link again within it shares anyway
 const WARN_FOR: Duration = Duration::from_secs(120);
 
@@ -77,6 +78,7 @@ pub fn expiry_label(days: u32) -> String {
     match days {
         0 => "never expires".into(),
         1 => "expires in 24 hours".into(),
+        365 => "expires in 1 year".into(),
         d => format!("expires in {d} days"),
     }
 }
@@ -159,7 +161,7 @@ struct Job {
 /// The whole share, blocking: ready? -> upload link -> PUT -> /share -> remembered. The same capture again
 /// reuses its path, so its link shows the new picture. Ok((link, true)) = an existing link was updated.
 fn run(http: &dyn Http, base: &str, st: &Store, job: Job, default_days: u32) -> Result<(Shared, bool), Fail> {
-    let token = token_of(st)?;
+    let token = token_or_device(http, base, st)?;
     let api = Api { base: base.to_string(), token, http };
     let res = (|| {
         api.ready()?;
@@ -229,13 +231,39 @@ fn token_of(st: &Store) -> Result<String, Fail> {
     Ok(t)
 }
 
-/// The server said the sign-in ended: forget it here too (the next press asks to sign in)
+/// The account's token, or (no account - 21 Nov 2026: links without signing in) this PC's device session: the device
+/// key is made once (32 random bytes), the server turns it into a session; the session is kept and asked again when
+/// the server says it ended. The same key always gets the same hidden device account, so its links stay its own.
+fn token_or_device(http: &dyn Http, base: &str, st: &Store) -> Result<String, Fail> {
+    if let Ok(t) = token_of(st) {
+        return Ok(t);
+    }
+    let (mut key, token) = st.device();
+    if !token.is_empty() {
+        return Ok(token);
+    }
+    if key.len() != 64 {
+        key = secret::random_hex32().ok_or_else(|| Fail::Msg("Couldn't make a device key on this PC".into()))?;
+        st.set_device(&key, "").map_err(|e| Fail::Msg(format!("Couldn't save the device key: {e}")))?;
+    }
+    let api = Api { base: base.to_string(), token: String::new(), http };
+    api.ready()?;
+    let t = api.auth_device(&key)?;
+    let _ = st.set_device(&key, &t);
+    Ok(t)
+}
+
+/// The server said the sign-in ended: forget it here too (signed in: the next press asks to sign in; device: the next
+/// press gets a new device session with the same key)
 fn signed_out_check<T>(st: &Store, r: &Result<T, Fail>) {
     if matches!(r, Err(Fail::SignedOut)) {
         if let Some(a) = st.account() {
             secret::forget(&a.token);
+            st.clear_account();
+        } else {
+            let (key, _) = st.device();
+            let _ = st.set_device(&key, "");
         }
-        st.clear_account();
     }
 }
 
@@ -297,7 +325,9 @@ fn share(pic: Arc<Pic>, id: String, cfg: &Config, check: bool) {
             let t0 = Instant::now();
             let (s, again) = run(&net::Net, &base, &Store::app(), job, days)?;
             crate::log::line("share", &format!("link {} ({} KB, {} ms){}", short(&s.id), size / 1024, t0.elapsed().as_millis(), if again { ", same link updated" } else { "" }));
-            let mut note = if again { format!("Link updated - {}", expiry_left(s.expires, crate::util::unix_now())) } else { format!("Link copied - {}", expiry_label(s.days)) };
+            // the server's end, not the wish: "never" without an account is a year (22 Nov 2026)
+            let left = if s.expires > 0 { expiry_left(s.expires, crate::util::unix_now()) } else { expiry_label(0) };
+            let mut note = if again { format!("Link updated - {left}") } else { format!("Link copied - {left}") };
             if !enc.note.is_empty() {
                 note = format!("{note} · {}", enc.note);
             }
@@ -331,6 +361,8 @@ fn expiry_left(expires: i64, now: i64) -> String {
     let left = (expires - now).max(0);
     if left < 86400 {
         "expires within 24 hours".into()
+    } else if left > 360 * 86400 {
+        "expires in 1 year".into()
     } else {
         format!("expires in {} days", (left + 43200) / 86400)
     }
@@ -448,7 +480,7 @@ pub fn shared_captures() -> HashSet<String> {
 
 fn stop_with(http: &dyn Http, base: &str, st: &Store, capture: &str, now: i64) -> Result<(), Fail> {
     let Some(s) = st.get(capture, now) else { return Ok(()) };
-    let api = Api { base: base.to_string(), token: token_of(st)?, http };
+    let api = Api { base: base.to_string(), token: token_or_device(http, base, st)?, http };
     let r = api.remove(&s.path);
     signed_out_check(st, &r);
     r?;
@@ -457,7 +489,7 @@ fn stop_with(http: &dyn Http, base: &str, st: &Store, capture: &str, now: i64) -
 
 fn expiry_with(http: &dyn Http, base: &str, st: &Store, capture: &str, days: u32, now: i64) -> Result<Shared, Fail> {
     let s = st.get(capture, now).ok_or_else(|| Fail::Msg("This capture has no link".into()))?;
-    let api = Api { base: base.to_string(), token: token_of(st)?, http };
+    let api = Api { base: base.to_string(), token: token_or_device(http, base, st)?, http };
     let r = api.link(&s.path, &LinkReq { days, once: s.once, w: s.w, h: s.h, title: String::new() });
     signed_out_check(st, &r);
     let l = r?;

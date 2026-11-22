@@ -69,6 +69,18 @@ impl Store {
         self.write("share-account.json", &serde_json::to_string_pretty(a).map_err(|e| e.to_string())?)
     }
 
+    /// The device key + its last session token (share links without an account, 21 Nov 2026). A plain private file,
+    /// never the keyring: no KDE Wallet prompt, and the key only reaches this PC's own picture links.
+    pub fn device(&self) -> (String, String) {
+        let s = std::fs::read_to_string(self.dir.join("share-device.json")).unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+        (v["key"].as_str().unwrap_or("").to_string(), v["token"].as_str().unwrap_or("").to_string())
+    }
+
+    pub fn set_device(&self, key: &str, token: &str) -> Result<(), String> {
+        self.write("share-device.json", &serde_json::json!({ "key": key, "token": token }).to_string())
+    }
+
     pub fn clear_account(&self) {
         let _ = std::fs::remove_file(self.dir.join("share-account.json"));
     }

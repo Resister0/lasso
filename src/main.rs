@@ -12,6 +12,7 @@ mod app;
 mod clipboard;
 mod config;
 mod dialogs;
+mod echo_link;
 mod editor;
 mod export;
 mod ipc;
@@ -25,6 +26,7 @@ mod shapes;
 mod scroll;
 mod share;
 mod sound;
+mod theme;
 mod update;
 mod util;
 mod windows_ui;
@@ -100,8 +102,11 @@ pub fn notify(title: &str, body: &str) {
         std::thread::spawn(move || {
             if let Ok(c) = dbus::blocking::Connection::new_session() {
                 let p = c.with_proxy("org.freedesktop.Notifications", "/org/freedesktop/Notifications", std::time::Duration::from_secs(2));
-                let hints: dbus::arg::PropMap = Default::default();
-                let _: Result<(u32,), _> = p.method_call("org.freedesktop.Notifications", "Notify", ("Lasso", 0u32, desktop::APP_ID, t, b, Vec::<String>::new(), hints, 6000i32));
+                // short + transient (21 Nov 2026: "make the notifications last less time"): gone after 2.5 s and not
+                // kept in the notification history
+                let mut hints: dbus::arg::PropMap = Default::default();
+                hints.insert("transient".into(), dbus::arg::Variant(Box::new(true)));
+                let _: Result<(u32,), _> = p.method_call("org.freedesktop.Notifications", "Notify", ("Lasso", 0u32, desktop::APP_ID, t, b, Vec::<String>::new(), hints, 2500i32));
             }
         });
     }
@@ -358,10 +363,15 @@ fn handle(cmd: &str) {
         "full" => a.full_shot(),
         "repeat" => a.repeat_last(),
         "restore" => a.restore(),
+        "delete" => a.delete_last(),
         "library" => a.open_window("--library-window"),
         "settings" => a.open_window("--settings-window"),
-        "edit" => a.edit_library(arg),
-        "open" => a.open_file(arg),
+        // "edit:<id>\u{1f}<monitor>" from the Library: open it on that monitor
+        "edit" | "open" => {
+            let (arg, mon) = arg.split_once('\u{1f}').unwrap_or((arg, ""));
+            a.want_monitor(mon);
+            if c == "edit" { a.edit_library(arg) } else { a.open_file(arg) }
+        }
         "open-dialog" => open_dialog(),
         "copy-file" => a.copy_file(arg),
         "pin-file" => a.pin_file(arg),
@@ -459,7 +469,7 @@ fn start_hotkeys() {
             });
             return;
         }
-        let keys: [String; 5] = hotkeys_linux::IDS.map(|id| cfg.get(&format!("hk.{id}")).to_string());
+        let keys: [String; hotkeys_linux::N] = hotkeys_linux::IDS.map(|id| cfg.get(&format!("hk.{id}")).to_string());
         HOTKEYS.with(|h| {
             let mut h = h.borrow_mut();
             match h.as_ref() {
@@ -643,8 +653,8 @@ fn main() {
     match a0 {
         "--help" | "-h" => return usage(),
         "--version" | "-V" => return println!("Lasso {}", env!("CARGO_PKG_VERSION")),
-        "--settings-window" => return windows_ui::settings_main(),
-        "--library-window" => return windows_ui::library_main(),
+        "--settings-window" => return windows_ui::window_main(0),
+        "--library-window" => return windows_ui::window_main(1),
         _ => {}
     }
     let abs = |p: &str| std::fs::canonicalize(p).map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string());
