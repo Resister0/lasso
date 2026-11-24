@@ -13,6 +13,19 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// The monitor the Library asked for: "<name>" or "<name>@<x>,<y>" (the Library window's centre, physical pixels).
+/// Windows' names never matched (winit "\\.\DISPLAY1" vs Lasso's "monitor 1", 24 Nov 2026: a double-click opened the
+/// picture on the other monitor), so the point decides when the name doesn't. On Windows x / y = the physical origin.
+pub fn out_for(outs: &[OutInfo], want: &str) -> Option<usize> {
+    let (name, at) = want.rsplit_once('@').unwrap_or((want, ""));
+    if let Some(i) = outs.iter().position(|o| !name.is_empty() && o.name == name) {
+        return Some(i);
+    }
+    let (px, py) = at.split_once(',')?;
+    let (px, py): (i32, i32) = (px.trim().parse().ok()?, py.trim().parse().ok()?);
+    outs.iter().position(|o| px >= o.x && px < o.x + o.pw && py >= o.y && py < o.y + o.ph)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct OutInfo {
     pub key: u32,
@@ -1878,10 +1891,10 @@ impl App {
 
     fn editor_for(&mut self, base: Pic) -> Editor {
         self.prepare();
-        if let Some(name) = self.want_out.take() {
-            match self.outs.iter().position(|o| o.info.name == name) {
+        if let Some(want) = self.want_out.take() {
+            match out_for(&self.outs.iter().map(|o| o.info.clone()).collect::<Vec<_>>(), &want) {
                 Some(i) => self.active = i,
-                None => crate::log::line("app", &format!("monitor {name} not found - opened where the mouse last was")),
+                None => crate::log::line("app", &format!("monitor {want} not found - opened where the mouse last was")),
             }
         }
         let o = self.outs.get(self.active).or(self.outs.first());
@@ -2231,6 +2244,14 @@ impl App {
         }
     }
 
+    /// A note for the corner thumbnail only if it still shows that capture (share.rs: "Uploading for a link..." ->
+    /// "Link copied - ..." when the upload is done; a newer capture's thumbnail is left alone)
+    pub fn thumb_note_for(&mut self, id: &str, note: &str) {
+        if let Some(t) = self.thumb.as_ref().filter(|t| t.id == id) {
+            t.t.set_note(sh(note));
+        }
+    }
+
     /// The full screenshot's background save finished: the thumbnail drags / deletes that file
     pub fn thumb_saved(&mut self, id: &str, path: String) {
         if let Some(l) = self.last_out.as_mut().filter(|l| l.0 == id) {
@@ -2373,6 +2394,23 @@ impl App {
     pub fn pin_lib(&mut self, id: &str) {
         match library::finished(id) {
             Ok(p) => self.pin(Arc::new(p), None, (80, 80), 1.0),
+            Err(e) => crate::notify("Lasso", &e),
+        }
+    }
+
+    /// The Library's Share link for a capture: its finished picture, under its own id (sharing it again later -
+    /// also from the frozen screen - updates the same link)
+    pub fn share_lib(&mut self, id: &str) {
+        match library::finished(id) {
+            Ok(p) => crate::share::start(Arc::new(p), id.to_string(), &self.cfg),
+            Err(e) => crate::notify("Lasso", &e),
+        }
+    }
+
+    /// The Library's Share link for a picture from the save folder: under a hash of its path (share::file_key)
+    pub fn share_file(&mut self, path: &str) {
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| crate::export::decode(&b)) {
+            Ok(p) => crate::share::start(Arc::new(p), crate::share::file_key(std::path::Path::new(path)), &self.cfg),
             Err(e) => crate::notify("Lasso", &e),
         }
     }
@@ -2888,6 +2926,19 @@ mod tests {
         let mut p = Pic::new(w, h);
         p.px.chunks_exact_mut(4).for_each(|c| c.copy_from_slice(&[v, v, v, 255]));
         p
+    }
+
+    #[test]
+    fn library_monitor_by_name_or_window_point() {
+        let o = |n: &str, x: i32| OutInfo { name: n.into(), x, y: 0, w: 2560, h: 1440, pw: 2560, ph: 1440, ..Default::default() };
+        let outs = [o("monitor 1", 0), o("monitor 2", 2560)];
+        assert_eq!(out_for(&outs, "monitor 2"), Some(1));
+        // Windows: winit's name never matches, the window's centre does
+        assert_eq!(out_for(&outs, "\\\\.\\DISPLAY1@3800,700"), Some(1));
+        assert_eq!(out_for(&outs, "\\\\.\\DISPLAY2@1200,700"), Some(0));
+        assert_eq!(out_for(&outs, "\\\\.\\DISPLAY1"), None);
+        assert_eq!(out_for(&outs, "x@9000,700"), None);
+        assert_eq!(out_for(&outs, ""), None);
     }
 
     #[test]

@@ -121,15 +121,18 @@ fn set_channel(ch: &str, code: &str) -> std::io::Result<()> {
 
 /// a > b for "x.y.z" versions (anything after - or + is ignored)
 fn ver_gt(a: &str, b: &str) -> bool {
-    let p = |s: &str| -> Vec<u64> { s.trim().trim_start_matches('v').split(['.', '-', '+']).take(3).map(|x| x.parse().unwrap_or(0)).collect() };
-    let (x, y) = (p(a), p(b));
-    for i in 0..3 {
-        let (u, w) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
-        if u != w {
-            return u > w;
-        }
-    }
-    false
+    ver_key(a) > ver_key(b)
+}
+
+/// 0.1.8 -> (0, 1, 8, MAX); a beta / dev build 0.1.8-dev.3 -> (0, 1, 8, 3): OLDER than the Stable 0.1.8 it leads up
+/// to, newer than 0.1.7 (24 Nov 2026, like Echo's; ci/build.yml names them). Beta and dev share one count.
+fn ver_key(s: &str) -> (u64, u64, u64, u64) {
+    let s = s.trim().trim_start_matches('v');
+    let s = s.split('+').next().unwrap_or("");
+    let (core, pre) = s.split_once('-').map_or((s, None), |(c, p)| (c, Some(p)));
+    let n: Vec<u64> = core.split('.').take(3).map(|x| x.parse().unwrap_or(0)).collect();
+    let pre = pre.map_or(u64::MAX, |p| p.rsplit('.').next().and_then(|x| x.parse().ok()).unwrap_or(0));
+    (n.first().copied().unwrap_or(0), n.get(1).copied().unwrap_or(0), n.get(2).copied().unwrap_or(0), pre)
 }
 
 fn now() -> u64 {
@@ -241,18 +244,24 @@ pub fn tray_label() -> Option<String> {
 /// GET -> (status, body). reqwest blocking + rustls/ring like ping.rs (rustls without a default crypto provider: ring
 /// is installed once). Redirects are followed (GitHub downloads redirect).
 fn http_get(url: &str) -> Result<(u16, Vec<u8>), String> {
-    http(url, &[], None)
+    http_t(url, &[], None, 300)
 }
 
-/// GET (or POST with a JSON body) with extra headers
+/// The short requests (update check, channel code): an answer within 30 s, else "Couldn't check" (24 Nov 2026: a check
+/// by hand showed "Checking…" for 20+ s while the server answers in under a second; downloads keep 300 s)
 fn http(url: &str, headers: &[(&str, String)], post_json: Option<String>) -> Result<(u16, Vec<u8>), String> {
+    http_t(url, headers, post_json, 30)
+}
+
+/// GET (or POST with a JSON body) with extra headers, at most `secs` seconds in all
+fn http_t(url: &str, headers: &[(&str, String)], post_json: Option<String>, secs: u64) -> Result<(u16, Vec<u8>), String> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
     let c = reqwest::blocking::Client::builder()
         .user_agent(concat!("Lasso/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(secs))
         .build()
         .map_err(|e| e.to_string())?;
     let mut req = match post_json {
@@ -296,16 +305,19 @@ fn check_and_save() -> Result<State, String> {
     // dev sends the tester code (sonela.app answers stable for a wrong one)
     let (ch, dev_code) = channel();
     let headers = if ch == "dev" { vec![("x-sonela-code", dev_code)] } else { vec![] };
+    let t0 = std::time::Instant::now();
     let r = http(&with_channel(check_url_for(os(), arch(), VERSION), &ch), &headers, None).and_then(|(code, body)| parse_answer(code, &String::from_utf8_lossy(&body), VERSION, now()));
     let s = match &r {
         Ok(s) => s.clone(),
         Err(e) => State { error: e.clone(), checked: now(), ..read() },
     };
     write(&s);
+    // how long the answer took (a slow check by hand, 24 Nov 2026: the log should say where the time went)
+    let took = format!("{:.1} s", t0.elapsed().as_secs_f32());
     match &r {
-        Ok(s) if s.version.is_empty() => log(&format!("up to date ({VERSION})")),
-        Ok(s) => log(&format!("{} available (this is {VERSION})", s.version)),
-        Err(e) => log(&format!("check failed: {e}")),
+        Ok(s) if s.version.is_empty() => log(&format!("up to date ({VERSION}), answer in {took}")),
+        Ok(s) => log(&format!("{} available (this is {VERSION}), answer in {took}", s.version)),
+        Err(e) => log(&format!("check failed after {took}: {e}")),
     }
     r
 }
@@ -489,6 +501,7 @@ impl Updater {
             return;
         }
         if by_hand {
+            log("check by hand");
             self.set_status("Checking…");
         }
         let u = self.clone();
@@ -665,6 +678,13 @@ mod tests {
         assert!(!ver_gt("0.1.2", "0.1.3"));
         assert!(ver_gt("v0.2.0", "0.1.3-dev"));
         assert!(!ver_gt("", "0.1.0"));
+        // test builds named after their Stable (24 Nov 2026)
+        assert!(ver_gt("0.1.8-beta.1", "0.1.7"));
+        assert!(ver_gt("0.1.8", "0.1.8-dev.9"));
+        assert!(ver_gt("0.1.8-dev.2", "0.1.8-beta.1"));
+        assert!(ver_gt("0.1.9-dev.1", "0.1.8"));
+        assert!(!ver_gt("0.1.8-dev.1", "0.1.8"));
+        assert!(!ver_gt("0.1.7", "0.1.8-beta.1"));
     }
 
     #[test]

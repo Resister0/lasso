@@ -334,20 +334,31 @@ fn share(pic: Arc<Pic>, id: String, cfg: &Config, check: bool) {
             Ok((s.url, keep, note))
         })();
         BUSY.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashSet::new).remove(&busy_id);
+        // the corner thumbnail said "Uploading for a link..." - it says how it went too (24 Nov 2026)
+        let thumb = move |note: String| {
+            let _ = slint::invoke_from_event_loop(move || crate::with_app(|a| a.thumb_note_for(&busy_id, &note)));
+        };
         match out {
             Ok((url, img, note)) if !url.is_empty() => {
+                let n2 = note.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     copy_link(&url, img);
                     crate::notify("Lasso", &note);
                 });
+                thumb(n2);
             }
-            Ok((_, _, warning)) => crate::notify("Lasso", &warning),
+            Ok((_, _, warning)) => {
+                crate::notify("Lasso", &warning);
+                thumb(warning);
+            }
             Err(e) => {
                 match &e {
                     Fail::Offline(why) => crate::log::line("share", &format!("no answer: {why}")),
                     _ => crate::log::line("share", &format!("not shared: {}", e.text())),
                 }
-                crate::notify("Lasso", &format!("No link made: {}", e.text()));
+                let m = format!("No link made: {}", e.text());
+                crate::notify("Lasso", &m);
+                thumb(m);
             }
         }
     });
@@ -465,6 +476,21 @@ pub fn sign_out(cfg: &Config) {
 }
 
 // ---------- links (UI: Library) ----------
+
+/// The share key of a picture from the save folder (not a capture). Never its path: the key becomes part of the
+/// picture's name on the server, and a path has the user's folder names in it (24 Nov 2026). A stable hash of the
+/// path instead (FNV-1a - std's hasher may change between Rust versions), so the same file keeps its one link.
+pub fn file_key(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    // Windows paths ignore case: C:\Pics\A.png and c:\pics\a.png are one file
+    let s = if cfg!(windows) { s.to_lowercase() } else { s.to_string() };
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("file-{h:016x}")
+}
 
 /// UI: the working link of a capture (Library link icon, "Copy link")
 #[allow(dead_code)]

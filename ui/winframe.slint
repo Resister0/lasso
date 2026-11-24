@@ -2,7 +2,7 @@
 // thinner title bar - 36 px instead of Echo / Aimdot's 52): logo + name, drag area, minimize / maximize / close.
 // Rust side: windows_ui.rs (native move, so Windows snap still works; double-click maximizes).
 
-import { T, WinBtn, Edge } from "theme.slint";
+import { T, WinBtn, Edge, LogoMark } from "theme.slint";
 
 export component TitleBar inherits Rectangle {
     in property <string> title;
@@ -28,11 +28,10 @@ export component TitleBar inherits Rectangle {
     HorizontalLayout {
         padding-left: 12px;
         spacing: 8px;
-        Image {
+        LogoMark {
             y: (parent.height - self.height) / 2;
             width: 20px;
             height: 20px;
-            source: @image-url("../assets/icons/lasso.svg");
         }
         Text {
             text: root.title;

@@ -1,7 +1,7 @@
 // The mini library (the user, 13 Nov 2026: "would be cool too"): every capture with its shapes still editable +
 // the pictures in the save folder. Double-click / Edit = back on the frozen screen with every tool.
 
-import { T, Btn, IconBtn, Pill, Seg } from "theme.slint";
+import { T, Btn, IconBtn, Pill, Seg, Kbd } from "theme.slint";
 import { TitleBar, Edges } from "winframe.slint";
 
 export struct LibItem {
@@ -22,10 +22,102 @@ export struct LibGroup {
     items: [LibItem],
 }
 
+// one button of a tile's hover bar (dark square, accent on hover)
+component ActBtn inherits Rectangle {
+    in property <string> icon;
+    callback clicked;
+    callback hovered(bool);
+    width: 26px;
+    border-radius: 6px;
+    background: bta.has-hover ? T.accent : #000000b0;
+    Path {
+        width: 15px;
+        height: 15px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke-width: 1.8px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+        // on the accent: the theme's text-on-accent (dark on Mono / a bright theme of the user's own, 24 Nov 2026)
+        stroke: bta.has-hover ? T.on-accent : white;
+        commands: root.icon;
+    }
+    bta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        changed has-hover => { root.hovered(self.has-hover); }
+    }
+}
+
+// one line of the right-click menu
+component MenuRow inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    callback clicked;
+    height: 30px;
+    border-radius: 6px;
+    background: mta.has-hover ? T.hover : transparent;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 12px;
+        spacing: 8px;
+        Path {
+            y: (parent.height - self.height) / 2;
+            width: 15px;
+            height: 15px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke-width: 1.8px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            fill: transparent;
+            stroke: T.muted;
+            commands: root.icon;
+        }
+        Text { text: root.text; color: T.text; font-size: 13px; vertical-alignment: center; }
+    }
+    mta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component Tile inherits Rectangle {
     in property <LibItem> it;
+    in property <bool> share-on;
+    // Ctrl held (Echo's power-user mode): every tile shows its buttons at once
+    in property <bool> show-all;
     callback act(string);
     callback pick(bool);
+    callback hover(bool);
+    changed hov => { root.hover(root.hov); }
+    // icons (24 x 24, stroked)
+    property <string> i-copy: "M10 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3";
+    property <string> i-link: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7";
+    // the right-click menu (24 Nov 2026, the user: "make each screenshot right clickable then a simple copy button,
+    // but don't remove the button for hovering to copy, both are intuitive")
+    menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 170px;
+        Rectangle {
+            background: T.panel;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: T.line;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000080;
+        }
+        VerticalLayout {
+            padding: 4px;
+            spacing: 1px;
+            MenuRow { text: "Copy"; icon: root.i-copy; clicked => { root.act("copy"); } }
+            if root.share-on: MenuRow { text: root.it.shared ? "Copy link" : "Share link"; icon: root.i-link; clicked => { root.act("share"); } }
+        }
+    }
+    property <length> menu-x;
+    property <length> menu-y;
     // the action bar stays while the mouse is on one of its buttons (they take the hover from the tile)
     property <bool> icon-hov;
     property <bool> hov: ta.has-hover || bar-ta.has-hover || icon-hov;
@@ -34,14 +126,23 @@ component Tile inherits Rectangle {
     border-width: it.sel ? 2px : 1px;
     border-color: it.sel ? T.accent : hov ? T.accent.with-alpha(0.4) : T.line;
     clip: true;
+    // 24 Nov 2026 (the user): "only a Ctrl + left click should select, a single click should simply open it"
+    property <bool> picking;
     ta := TouchArea {
         mouse-cursor: pointer;
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                root.pick(e.modifiers.control || e.modifiers.shift);
+                root.picking = e.modifiers.control || e.modifiers.shift || e.modifiers.meta;
+                if root.picking { root.pick(true); }
+            }
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
+                menu.show();
             }
         }
-        double-clicked => { root.act("edit"); }
+        // a double-click is two clicks: the second one is dropped in windows_ui.rs ("edit" once per 0.8 s)
+        clicked => { if !root.picking { root.act("edit"); } }
     }
     Rectangle {
         x: 6px;
@@ -84,7 +185,7 @@ component Tile inherits Rectangle {
                 width: bt.preferred-width + 14px;
                 border-radius: 6px;
                 background: bta.has-hover ? T.accent : #000000c0;
-                bt := Text { text: b.id == "expiry" ? root.it.expiry : b.t; color: white; font-size: 11.5px; horizontal-alignment: center; vertical-alignment: center; }
+                bt := Text { text: b.id == "expiry" ? root.it.expiry : b.t; color: bta.has-hover ? T.on-accent : white; font-size: 11.5px; horizontal-alignment: center; vertical-alignment: center; }
                 bta := TouchArea {
                     mouse-cursor: pointer;
                     clicked => { root.act(b.id); }
@@ -93,13 +194,13 @@ component Tile inherits Rectangle {
             }
         }
     }
-    // the actions on hover
+    // the actions on hover (and on every tile while Ctrl is held)
     Rectangle {
         x: 10px;
         y: 10px;
         width: parent.width - 20px;
         height: 26px;
-        visible: root.hov;
+        visible: root.hov || root.show-all;
         bar-ta := TouchArea { }
         HorizontalLayout {
             spacing: 3px;
@@ -117,7 +218,7 @@ component Tile inherits Rectangle {
                     stroke-line-cap: round;
                     stroke-line-join: round;
                     fill: transparent;
-                    stroke: white;
+                    stroke: ota.has-hover ? T.on-accent : white;
                     commands: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5";
                 }
                 ota := TouchArea {
@@ -126,35 +227,14 @@ component Tile inherits Rectangle {
                     changed has-hover => { root.icon-hov = self.has-hover; }
                 }
             }
-            for a in [
-                { id: "edit", icon: "M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3zM13.5 6.5l3 3", tip: "Edit" },
-                { id: "copy", icon: "M10 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3", tip: "Copy" },
-                { id: "saveas", icon: "M12 3v12M7 10l5 5l5-5M4 21h16", tip: "Save as" },
-                { id: "pin", icon: "M12 17v5M5 9l7-7l7 7M8 9v4l-3 4h14l-3-4V9", tip: "Pin" },
-                { id: "folder", icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", tip: "Show in folder" },
-                { id: "delete", icon: "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3", tip: "Delete (to the trash)" },
-            ]: Rectangle {
-                width: 26px;
-                border-radius: 6px;
-                background: ata.has-hover ? T.accent : #000000b0;
-                Path {
-                    width: 15px;
-                    height: 15px;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    stroke-width: 1.8px;
-                    stroke-line-cap: round;
-                    stroke-line-join: round;
-                    fill: transparent;
-                    stroke: white;
-                    commands: a.icon;
-                }
-                ata := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.act(a.id); }
-                    changed has-hover => { root.icon-hov = self.has-hover; }
-                }
-            }
+            ActBtn { icon: "M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3zM13.5 6.5l3 3"; clicked => { root.act("edit"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: root.i-copy; clicked => { root.act("copy"); } hovered(h) => { root.icon-hov = h; } }
+            // Share link (24 Nov 2026): a shared one copies its link
+            if root.share-on: ActBtn { icon: root.i-link; clicked => { root.act("share"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M12 3v12M7 10l5 5l5-5M4 21h16"; clicked => { root.act("saveas"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M12 17v5M5 9l7-7l7 7M8 9v4l-3 4h14l-3-4V9"; clicked => { root.act("pin"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"; clicked => { root.act("folder"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"; clicked => { root.act("delete"); } hovered(h) => { root.icon-hov = h; } }
         }
     }
 }
@@ -171,6 +251,10 @@ export global LL {
     in-out property <bool> drag-over;
     in-out property <int> group-by;
     in-out property <bool> searching;
+    // share links switched on: Share link on the tiles + in their right-click menu
+    in-out property <bool> share-on;
+    // the picture under the mouse ("" = none) - the single-key commands act on it (Echo's power-user keys)
+    in-out property <string> hover-key;
 
     callback act(string, string);
     callback pick(string, bool);
@@ -187,6 +271,74 @@ export component LibraryView inherits Rectangle {
     property <int> cols: max(1, floor((root.width - 40px + root.gap) / (280px + root.gap)));
     property <length> tw: min(420px, (root.width - 40px - (root.cols - 1) * root.gap) / root.cols);
     property <length> th: (root.tw - 12px) * 0.625 + 40px;
+    // ---- Echo's power-user mode (24 Nov 2026, the user: "the power user CTRL commands that Echo has") ----
+    // Ctrl held 150 ms = every tile shows its buttons + the key bar; with the mouse on a picture single keys act on it.
+    // Not while pictures are selected (Ctrl+click selects then). Ctrl+A = all, Esc = none, Del = delete the selection.
+    property <bool> ctrl-down;
+    property <bool> ctrl-held;
+    property <bool> show-all: root.ctrl-held && LL.selected == 0;
+    property <int> sel-n: LL.selected;
+    changed sel-n => { if (root.sel-n > 0) { root.ctrl-off(); } }
+    function ctrl-off() {
+        root.ctrl-down = false;
+        root.ctrl-held = false;
+    }
+    Timer {
+        interval: 150ms;
+        running: root.ctrl-down;
+        triggered => {
+            root.ctrl-down = false;
+            root.ctrl-held = LL.selected == 0;
+        }
+    }
+    // the keys come here unless the search box has them; the Library takes them when it's shown / a tile is used
+    property <bool> shown: root.visible;
+    changed shown => { if (root.shown) { fs.focus(); } }
+    fs := FocusScope {
+        // Windows hands Ctrl+letter over as a control character (\u{1} = Ctrl+A, \u{3} = Ctrl+C - Echo's edui.rs fix)
+        key-pressed(e) => {
+            if (e.text == Key.Control) {
+                if (!e.repeat && LL.selected == 0) { root.ctrl-down = true; }
+                return accept;
+            }
+            if (!e.modifiers.control) { root.ctrl-off(); }
+            if (e.modifiers.control && (e.text == "a" || e.text == "A" || e.text == "\u{1}")) {
+                root.ctrl-off();
+                LL.bulk("all");
+                return accept;
+            }
+            if (e.text == Key.Escape && LL.selected > 0) { LL.bulk("clear"); return accept; }
+            if (e.text == Key.Delete && LL.selected > 0) { LL.bulk("delete"); return accept; }
+            if (e.modifiers.control && (e.text == "c" || e.text == "C" || e.text == "\u{3}")) {
+                root.ctrl-off();
+                if (LL.selected > 0) { LL.bulk("copy"); return accept; }
+                if (LL.hover-key == "") { return reject; }
+                LL.act("copy", LL.hover-key);
+                return accept;
+            }
+            if (LL.hover-key == "" || e.modifiers.control || e.modifiers.alt || e.modifiers.meta) { return reject; }
+            if (e.text == Key.Return || e.text == " " || e.text == "e" || e.text == "E") {
+                LL.act("edit", LL.hover-key);
+            } else if ((e.text == "l" || e.text == "L") && LL.share-on) {
+                LL.act("share", LL.hover-key);
+            } else if (e.text == "s" || e.text == "S") {
+                LL.act("saveas", LL.hover-key);
+            } else if (e.text == "p" || e.text == "P") {
+                LL.act("pin", LL.hover-key);
+            } else if (e.text == "o" || e.text == "O") {
+                LL.act("folder", LL.hover-key);
+            } else if (e.text == Key.Delete) {
+                LL.act("delete", LL.hover-key);
+            } else {
+                return reject;
+            }
+            return accept;
+        }
+        key-released(e) => {
+            if (e.text == Key.Control) { root.ctrl-off(); }
+            return reject;
+        }
+    }
     VerticalLayout {
                 // search (the text in the pictures, app, file name) + group by day / app
         Rectangle {
@@ -224,6 +376,11 @@ export component LibraryView inherits Rectangle {
                         font-size: 13px;
                         single-line: true;
                         edited => { LL.search(self.text); }
+                        // Esc leaves the search box: the Library's keys work again
+                        key-pressed(e) => {
+                            if (e.text == Key.Escape) { fs.focus(); return accept; }
+                            return reject;
+                        }
                     }
                     if q.text == "": Text {
                         x: 32px;
@@ -266,8 +423,21 @@ export component LibraryView inherits Rectangle {
                             width: root.tw;
                             height: root.th;
                             it: it;
+                            share-on: LL.share-on;
+                            show-all: root.show-all;
                             act(a) => { LL.act(a, it.key); }
-                            pick(add) => { LL.pick(it.key, add); }
+                            pick(add) => {
+                                fs.focus();
+                                LL.pick(it.key, add);
+                            }
+                            hover(h) => {
+                                if (h) {
+                                    LL.hover-key = it.key;
+                                    if (!q.has-focus) { fs.focus(); }
+                                } else if (LL.hover-key == it.key) {
+                                    LL.hover-key = "";
+                                }
+                            }
                         }
                     }
                 }
@@ -306,6 +476,51 @@ export component LibraryView inherits Rectangle {
             Btn { y: (parent.height - self.height) / 2; small: true; text: "Copy"; clicked => { LL.bulk("copy"); } }
             Btn { y: (parent.height - self.height) / 2; small: true; text: "Delete"; danger: true; clicked => { LL.bulk("delete"); } }
             Btn { y: (parent.height - self.height) / 2; small: true; text: "Clear"; clicked => { LL.bulk("clear"); } }
+        }
+    }
+    // the key bar while Ctrl is held (Echo's #keyhint): bottom centre, never over the selection bar
+    if root.show-all: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 18px;
+        width: min(khl.preferred-width, root.width - 24px);
+        height: khl.preferred-height;
+        background: T.panel;
+        border-width: 1px;
+        border-color: T.line;
+        border-radius: 10px;
+        drop-shadow-blur: 30px;
+        drop-shadow-offset-y: 10px;
+        drop-shadow-color: #00000088;
+        clip: true;
+        khl := HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            for part in [
+                { t: "Mouse on a picture: ", k: false }, { t: "Enter", k: true }, { t: " edit · ", k: false },
+                { t: "Ctrl", k: true }, { t: "+", k: false }, { t: "C", k: true }, { t: " copy · ", k: false },
+                { t: "L", k: true }, { t: " link · ", k: false }, { t: "S", k: true }, { t: " save as · ", k: false },
+                { t: "P", k: true }, { t: " pin · ", k: false }, { t: "O", k: true }, { t: " folder · ", k: false },
+                { t: "Del", k: true }, { t: " delete · ", k: false }, { t: "Ctrl", k: true }, { t: "+click select · ", k: false },
+                { t: "Ctrl", k: true }, { t: "+", k: false }, { t: "A", k: true }, { t: " all", k: false }
+            ]: Rectangle {
+                // "L link" only while share links are on
+                property <bool> off: !LL.share-on && (part.t == "L" || part.t == " link · ");
+                width: self.off ? 0px : part.k ? kb.width : tx.preferred-width;
+                height: 20px;
+                kb := Kbd {
+                    visible: part.k && !parent.off;
+                    text: part.k ? part.t : "";
+                }
+                tx := Text {
+                    visible: !part.k && !parent.off;
+                    text: part.t;
+                    font-size: 12px;
+                    color: T.muted;
+                    vertical-alignment: center;
+                }
+            }
         }
     }
     if LL.toast != "": Rectangle {

@@ -13,6 +13,10 @@ export global B {
     in-out property <color> accent: #14a38b;
     in-out property <color> accent2: #36c9a8;
     in-out property <color> accent3: #0d8085;
+    // the logo tile: the theme's gradient start (accent / accent3 are its middle / end) and the lasso on it
+    // (near-black on very light accents: Mono, Sand...)
+    in-out property <color> g0: #36c9a8;
+    in-out property <color> on-accent: #ffffff;
 }
 
 // Icon paths (24 x 24, stroked) - the same drawings as the approved mockup
@@ -60,10 +64,18 @@ export component Ico inherits Path {
     height: 17px;
 }
 
-export component Logo inherits Image {
-    source: @image-url("../assets/icons/lasso.svg");
+// the logo in the theme's colours (24 Nov 2026, like LogoMark in theme.slint): gradient tile + the lasso on top
+export component Logo inherits Rectangle {
     width: 20px;
     height: 20px;
+    border-radius: self.width * 14 / 64;
+    background: @linear-gradient(135deg, B.g0 0%, B.accent 55%, B.accent3 100%);
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("../assets/icons/lasso-mark.svg");
+        colorize: B.on-accent;
+    }
 }
 
 export component Kbd inherits Rectangle {

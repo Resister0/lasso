@@ -125,11 +125,28 @@ export component Thumb inherits Window {
                             if root.del-key != "": Text { text: root.del-key + " deletes it (no mouse needed)"; color: #ffffffc0; font-size: 11.5px; horizontal-alignment: center; }
                         }
                     }
+                    // what just happened ("Uploading for a link...", "Link copied - expires in 1 year", "Copied + saved ·
+                    // name.png"), the picture's whole width, wrapping (24 Nov 2026: next to the buttons it was cut
+                    // off after ~15 letters)
+                    if root.note != "": Rectangle {
+                        y: parent.height - self.height;
+                        height: nt.preferred-height + 10px;
+                        background: #000000d0;
+                        nt := Text {
+                            x: 8px;
+                            y: 5px;
+                            width: parent.width - 16px;
+                            text: root.note;
+                            color: white;
+                            font-size: 11.5px;
+                            wrap: word-wrap;
+                        }
+                    }
                 }
                 HorizontalLayout {
                     height: 30px;
                     spacing: 2px;
-                    Text { text: root.note != "" ? root.note : root.info; color: B.muted; font-size: 11.5px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    Text { text: root.info; color: B.muted; font-size: 11.5px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
                     BarBtn { icon: I.copy; clicked => { root.act("copy"); } }
                     BarBtn { icon: I.save; clicked => { root.act("save"); } }
                     BarBtn { icon: I.pin; clicked => { root.act("pin"); } }

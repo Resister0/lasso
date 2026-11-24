@@ -318,3 +318,17 @@ jobs:
           $CHANNEL build - Lasso copies set to the $CHANNEL update channel (Settings > About > Updates) get it as an update. Everyone else: download the normal version from sonela.app/lasso.
           Windows build: ${{ needs.windows.result }} / Linux build: ${{ needs.linux.result }}"
           fi
+      - name: Announce on Discord
+        # 24 Nov 2026 (the user): stable releases are posted in the Echo Discord's #updates too, like Echo's own. Secret
+        # DISCORD_WEBHOOK = a webhook of that channel named "Sonela Lasso" with Lasso's icon (Discord shows that name and
+        # picture); not set -> skipped. Beta / dev and "#" internal builds are never posted. Never fails the release.
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          [ -n "$DISCORD_WEBHOOK" ] || { echo "DISCORD_WEBHOOK not set - skipping"; exit 0; }
+          [ "$CHANNEL" = "stable" ] || { echo "$CHANNEL build - no Discord post"; exit 0; }
+          V=$(cat ci/version.txt 2>/dev/null | tr -d ' \r\n'); msg=$(git log -1 --pretty=%s)
+          case "$msg" in "#"*) echo "internal build - no Discord post"; exit 0 ;; esac
+          jq -n --arg v "$V" --arg m "$msg" '{embeds: [{title: ("Lasso " + $v + " is out"), url: "https://sonela.app/lasso", color: 1352587,
+            description: ($m + "\n\nLasso updates itself. New here? https://sonela.app/lasso")}]}' > discord.json
+          curl -sS -f -X POST -H "Content-Type: application/json" --data @discord.json "$DISCORD_WEBHOOK" || echo "::warning::Discord post failed"

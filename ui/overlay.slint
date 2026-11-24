@@ -424,7 +424,7 @@ export component Overlay inherits Window {
         background: B.accent;
         chip-t := Text {
             text: root.size-label;
-            color: white;
+            color: B.on-accent;   // dark on a bright theme (Mono, own light themes)
             font-size: 12px;
             font-weight: 600;
             horizontal-alignment: center;
@@ -776,7 +776,7 @@ export component Overlay inherits Window {
         background: B.accent;
         // a narrow box: no room next to the actions (and never inside the box over the picture)
         visible: root.ubw > 260px && (root.act-below || root.act-above);
-        cst := Text { text: root.size-label; color: white; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        cst := Text { text: root.size-label; color: B.on-accent; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
     }
     Rectangle {
         visible: root.show-bars && root.bar-any;
