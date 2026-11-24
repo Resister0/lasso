@@ -2231,6 +2231,14 @@ impl App {
         }
     }
 
+    /// A note for the corner thumbnail only if it still shows that capture (share.rs: "Uploading for a link..." ->
+    /// "Link copied - ..." when the upload is done; a newer capture's thumbnail is left alone)
+    pub fn thumb_note_for(&mut self, id: &str, note: &str) {
+        if let Some(t) = self.thumb.as_ref().filter(|t| t.id == id) {
+            t.t.set_note(sh(note));
+        }
+    }
+
     /// The full screenshot's background save finished: the thumbnail drags / deletes that file
     pub fn thumb_saved(&mut self, id: &str, path: String) {
         if let Some(l) = self.last_out.as_mut().filter(|l| l.0 == id) {
@@ -2373,6 +2381,23 @@ impl App {
     pub fn pin_lib(&mut self, id: &str) {
         match library::finished(id) {
             Ok(p) => self.pin(Arc::new(p), None, (80, 80), 1.0),
+            Err(e) => crate::notify("Lasso", &e),
+        }
+    }
+
+    /// The Library's Share link for a capture: its finished picture, under its own id (sharing it again later -
+    /// also from the frozen screen - updates the same link)
+    pub fn share_lib(&mut self, id: &str) {
+        match library::finished(id) {
+            Ok(p) => crate::share::start(Arc::new(p), id.to_string(), &self.cfg),
+            Err(e) => crate::notify("Lasso", &e),
+        }
+    }
+
+    /// The Library's Share link for a picture from the save folder: under a hash of its path (share::file_key)
+    pub fn share_file(&mut self, path: &str) {
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| crate::export::decode(&b)) {
+            Ok(p) => crate::share::start(Arc::new(p), crate::share::file_key(std::path::Path::new(path)), &self.cfg),
             Err(e) => crate::notify("Lasso", &e),
         }
     }

@@ -11,21 +11,25 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Where Echo's settings.json can be: Windows %APPDATA%\Clipper, Linux ~/.config/Clipper (Echo points APPDATA
-/// there), the Flatpak's own config folder. Test copies (LASSO_HOME) only ever look inside their own folder.
+/// Where Echo's settings.json can be: Windows %APPDATA%\EchoClip, Linux ~/.config/EchoClip (Echo points APPDATA
+/// there), the Flatpak's own config folder. Echo's folder was called "Clipper" until 24 Nov 2026: Echo renames it once
+/// and marks the new one (.echo-folder) - same rule as Echo's own data_dir: the marked new folder, else the old one.
+/// Test copies (LASSO_HOME) only ever look inside their own folder.
 fn settings_files() -> Vec<PathBuf> {
-    if let Some(t) = std::env::var_os("LASSO_HOME") {
-        return vec![PathBuf::from(t).join("echo-config").join("Clipper").join("settings.json")];
-    }
+    let pair = |base: PathBuf, v: &mut Vec<PathBuf>| v.extend(settings_in(&base));
     let mut v = vec![];
+    if let Some(t) = std::env::var_os("LASSO_HOME") {
+        pair(PathBuf::from(t).join("echo-config"), &mut v);
+        return v;
+    }
     if cfg!(windows) {
         if let Some(a) = std::env::var_os("APPDATA") {
-            v.push(PathBuf::from(a).join("Clipper").join("settings.json"));
+            pair(PathBuf::from(a), &mut v);
         }
     } else {
         let cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
-        v.push(cfg.join("Clipper").join("settings.json"));
-        v.push(home().join(".var/app/link.echoclip.Echo/config/Clipper/settings.json"));
+        pair(cfg, &mut v);
+        pair(home().join(".var/app/link.echoclip.Echo/config"), &mut v);
     }
     v
 }
@@ -38,6 +42,16 @@ fn clips_dir_from(json: &str) -> PathBuf {
         .filter(|d| !d.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join("Videos").join("EchoClips"))
+}
+
+/// Echo's settings.json under one config folder, the one Echo uses first
+fn settings_in(base: &Path) -> Vec<PathBuf> {
+    let mut v = vec![];
+    if base.join("EchoClip").join(".echo-folder").is_file() {
+        v.push(base.join("EchoClip").join("settings.json"));
+    }
+    v.push(base.join("Clipper").join("settings.json"));
+    v
 }
 
 /// Echo's Screenshots folder, or None when Echo isn't set up on this PC (no settings.json found)
@@ -163,6 +177,19 @@ mod tests {
         assert_eq!(clips_dir_from(r#"{"clips_dir": "/x/My Clips", "other": 1}"#), PathBuf::from("/x/My Clips"));
         assert_eq!(clips_dir_from(r#"{"clips_dir": ""}"#), home().join("Videos").join("EchoClips"));
         assert_eq!(clips_dir_from("not json"), home().join("Videos").join("EchoClips"));
+    }
+
+    /// 24 Nov 2026: Echo's folder "Clipper" became "EchoClip" (renamed once by Echo, marked with .echo-folder) - Lasso
+    /// finds Echo's settings in both, the marked new folder first; an unmarked "EchoClip" isn't Echo's
+    #[test]
+    fn finds_echo_in_the_old_and_the_new_folder() {
+        let b = std::env::temp_dir().join(format!("lasso-echo-dir-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&b);
+        std::fs::create_dir_all(b.join("EchoClip")).unwrap();
+        assert_eq!(settings_in(&b), vec![b.join("Clipper").join("settings.json")]);
+        std::fs::write(b.join("EchoClip").join(".echo-folder"), "").unwrap();
+        assert_eq!(settings_in(&b), vec![b.join("EchoClip").join("settings.json"), b.join("Clipper").join("settings.json")]);
+        let _ = std::fs::remove_dir_all(&b);
     }
 
     #[test]

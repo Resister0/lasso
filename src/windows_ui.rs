@@ -172,6 +172,7 @@ fn open_path(p: &std::path::Path) {
 fn fill_settings(w: &LassoWindow, listening: &str) {
     let c = Config::load();
     w.global::<SS>().set_version(sh(env!("CARGO_PKG_VERSION")));
+    w.global::<SS>().set_win(cfg!(windows));
     w.global::<SS>().set_enter_does(match c.get("enter_does") {
         "save" => 1,
         "copysave" => 2,
@@ -592,6 +593,16 @@ fn matches(it: &library::Item, q: &str) -> bool {
     q.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
 }
 
+/// The key a tile's share link is kept under: a capture's id, or for a picture from the save folder a hash of its
+/// path (share::file_key - never the path itself)
+fn share_key(key: &str, is_lib: bool) -> String {
+    if is_lib {
+        key.to_string()
+    } else {
+        crate::share::file_key(std::path::Path::new(key))
+    }
+}
+
 fn key_of(it: &library::Item) -> String {
     if it.id.is_empty() {
         it.path.to_string_lossy().to_string()
@@ -630,14 +641,15 @@ fn fill_library(w: &LassoWindow, lib: &Lib) {
         let title = if lib.by_app { app_of(it) } else { day_title(it.created) };
         let (_, _, _, h, mi, _) = crate::util::local_from_unix(it.created);
         let k = key_of(it);
+        let sk = share_key(&k, it.editable);
         let li = LibItem {
             key: sh(k.clone()),
             lib: it.editable,
             thumb: lib.thumbs.get(&k).cloned().unwrap_or_default(),
             time: sh(format!("{h:02}:{mi:02}")),
             info: sh(if it.editable { "capture · shapes editable".to_string() } else { it.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() }),
-            shared: it.shared || shared.contains(&it.id),
-            expiry: sh(crate::share::link_of(&it.id).map(|l| if l.once { format!("View once · {}", crate::share::expiry_label(l.days)) } else { crate::share::expiry_label(l.days) }).unwrap_or_default()),
+            shared: it.shared || shared.contains(&sk),
+            expiry: sh(crate::share::link_of(&sk).map(|l| if l.once { format!("View once · {}", crate::share::expiry_label(l.days)) } else { crate::share::expiry_label(l.days) }).unwrap_or_default()),
             saved: !it.editable,
             sel: lib.sel.contains(&k),
         };
@@ -659,6 +671,7 @@ fn fill_library(w: &LassoWindow, lib: &Lib) {
     w.global::<LL>().set_group_by(lib.by_app as i32);
     w.global::<LL>().set_count(sh(format!("{} picture{}", lib.items.len(), if lib.items.len() == 1 { "" } else { "s" })));
     w.global::<LL>().set_selected(lib.sel.len() as i32);
+    w.global::<LL>().set_share_on(crate::share::enabled(&Config::load()));
     w.global::<LL>().set_groups(ModelRc::new(VecModel::from(groups)));
 }
 
@@ -833,10 +846,42 @@ fn delete_item(key: &str, is_lib: bool) -> Result<usize, String> {
     Ok(n.max(1))
 }
 
+thread_local! {
+    // the Library's Share link: looks once a second whether the running Lasso made the link (max. 2 minutes)
+    static LINK_WATCH: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+}
+
+/// After Share link: once the link exists, the tile shows it (link icon, Copy link / expiry / Stop sharing)
+fn watch_link(w: &LassoWindow, sk: String) {
+    let ww = w.as_weak();
+    let t = slint::Timer::default();
+    let mut tries = 0;
+    t.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(1), move || {
+        tries += 1;
+        let done = crate::share::link_of(&sk).is_some();
+        if done {
+            if let Some(w) = ww.upgrade() {
+                lib_toast(&w, "Link copied - paste it anywhere");
+                LIB.with(|l| {
+                    if let Some(l) = l.borrow().as_ref() {
+                        fill_library(&w, &l.borrow());
+                    }
+                });
+            }
+        }
+        if done || tries >= 120 {
+            // stop from outside this callback (a timer can't drop itself while it runs)
+            slint::Timer::single_shot(std::time::Duration::ZERO, || LINK_WATCH.with(|x| *x.borrow_mut() = None));
+        }
+    });
+    LINK_WATCH.with(|x| *x.borrow_mut() = Some(t));
+}
+
 /// Delete from the Library (one or many). A shared capture's public link is stopped FIRST (network, own thread) and
 /// the capture goes only when that worked - else a "never" link would stay public with no way to stop it (review D1).
 fn delete_keys(w: &LassoWindow, lib: &Rc<RefCell<Lib>>, keys: Vec<(String, bool)>) {
-    let (shared, plain): (Vec<_>, Vec<_>) = keys.into_iter().partition(|(k, is_lib)| *is_lib && crate::share::link_of(k).is_some());
+    // shared ones (captures and, since 24 Nov 2026, save-folder pictures): their link is stopped first
+    let (shared, plain): (Vec<_>, Vec<_>) = keys.into_iter().partition(|(k, is_lib)| crate::share::link_of(&share_key(k, *is_lib)).is_some());
     let (mut n, mut with_saved, mut err) = (0, false, None);
     for (k, is_lib) in &plain {
         match delete_item(k, *is_lib) {
@@ -865,16 +910,16 @@ fn delete_keys(w: &LassoWindow, lib: &Rc<RefCell<Lib>>, keys: Vec<(String, bool)
     lib_toast(w, "Stopping its link first...");
     std::thread::spawn(move || {
         let cfg = Config::load();
-        let res: Vec<(String, Result<(), String>)> = shared.into_iter().map(|(k, _)| {
-            let r = crate::share::stop(&cfg, &k);
-            (k, r)
+        let res: Vec<(String, bool, Result<(), String>)> = shared.into_iter().map(|(k, is_lib)| {
+            let r = crate::share::stop(&cfg, &share_key(&k, is_lib));
+            (k, is_lib, r)
         }).collect();
         let _ = slint::invoke_from_event_loop(move || {
             let mut fail = None;
             let mut done = 0;
-            for (k, r) in res {
+            for (k, is_lib, r) in res {
                 match r {
-                    Ok(()) => done += delete_item(&k, true).map(|_| 1).unwrap_or(0),
+                    Ok(()) => done += delete_item(&k, is_lib).map(|_| 1).unwrap_or(0),
                     Err(e) => fail = Some(e),
                 }
             }
@@ -1060,19 +1105,35 @@ fn setup_library(w: &LassoWindow) -> slint::Timer {
                 open_path(&p);
             }
             "delete" => delete_keys(&w, &l2, vec![(key.clone(), is_lib)]),
-            "copy-link" => match crate::share::link_of(&key) {
+            "copy-link" => match crate::share::link_of(&share_key(&key, is_lib)) {
                 Some(l) => {
                     tell(&format!("copy-text:{}", l.url));
                     lib_toast(&w, "Link copied");
                 }
                 None => lib_toast(&w, "Not shared"),
             },
+            // 24 Nov 2026 (the user: "is there no share link for existing pictures in the library?"): shared already =
+            // its link is copied; else the running Lasso uploads it (privacy check, link on the clipboard, a
+            // notification), and the tile shows the link once it's there
+            "share" => {
+                let sk = share_key(&key, is_lib);
+                if let Some(l) = crate::share::link_of(&sk) {
+                    tell(&format!("copy-text:{}", l.url));
+                    lib_toast(&w, "Link copied");
+                } else if !crate::share::enabled(&Config::load()) {
+                    lib_toast(&w, "Share links are off - switch them on in Settings > Share links");
+                } else {
+                    tell(&if is_lib { format!("share-lib:{key}") } else { format!("share-file:{key}") });
+                    lib_toast(&w, "Making a link...");
+                    watch_link(&w, sk);
+                }
+            }
             "stop-share" | "expiry" => {
                 let cfg = Config::load();
-                let k = key.clone();
+                let k = share_key(&key, is_lib);
                 let what = a.to_string();
                 let ww = w.as_weak();
-                let next = crate::share::link_of(&key).map(|l| {
+                let next = crate::share::link_of(&k).map(|l| {
                     let ch = crate::share::EXPIRY_CHOICES;
                     let i = ch.iter().position(|d| *d == l.days).map(|i| (i + 1) % ch.len()).unwrap_or(0);
                     ch[i]

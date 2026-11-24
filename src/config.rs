@@ -141,13 +141,6 @@ impl Config {
         crate::keys::Keymap::with_overrides(self.v.iter().filter_map(|(k, v)| k.strip_prefix("key.").map(|id| (id, v.as_str()))))
     }
 
-    /// The accent: (main, lighter, darker) as 0xRRGGBB
-    /// accent, lighter accent, darker gradient end - from the theme (Settings > General > Look)
-    pub fn accent(&self) -> (u32, u32, u32) {
-        let p = self.palette();
-        (p.accent, p.accent2, p.grad[2])
-    }
-
     /// The theme id in use ("" = Lasso teal; old theme=dark + accent=blue settings mapped, see theme.rs)
     pub fn theme_id(&self) -> String {
         crate::theme::current(self.get("theme"), self.get("accent"))

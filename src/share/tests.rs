@@ -356,3 +356,17 @@ fn opened_view_once_link_gets_a_new_link() {
     assert_eq!(m.st.lock().unwrap().objects[&c.path], b"third");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 24 Nov 2026: a save-folder picture shares under a hash of its path - stable, never the path (it becomes part of
+/// the picture's name on the server), and different files get different keys
+#[test]
+fn file_key_is_stable_and_private() {
+    let a = file_key(std::path::Path::new("/pics/Lasso 2026-11-24.png"));
+    assert_eq!(a, file_key(std::path::Path::new("/pics/Lasso 2026-11-24.png")));
+    assert!(a.starts_with("file-") && a.len() == 21, "{a}");
+    assert!(!a.contains("pics") && !a.contains("Lasso") && !a.contains('/'));
+    assert_ne!(a, file_key(std::path::Path::new("/pics/Lasso 2026-11-25.png")));
+    // the name made for the server from it has no part of the path either
+    let k = api::key_for(&a, "png", 2026, 11);
+    assert!(!k.contains("pics") && !k.contains("Lasso 2026"), "{k}");
+}

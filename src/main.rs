@@ -78,10 +78,12 @@ pub fn with_app(f: impl FnOnce(&mut App)) {
 /// Dark / light + the accent for the floating bars of every Lasso surface
 pub fn set_bars_look(b: &B, dark: bool) {
     b.set_dark(dark);
-    let (a, a2, a3) = config::Config::load().accent();
-    b.set_accent(config::color(a));
-    b.set_accent2(config::color(a2));
-    b.set_accent3(config::color(a3));
+    let p = config::Config::load().palette();
+    b.set_accent(config::color(p.accent));
+    b.set_accent2(config::color(p.accent2));
+    b.set_accent3(config::color(p.grad[2]));
+    b.set_g0(config::color(p.grad[0]));
+    b.set_on_accent(config::color(p.on_accent));
 }
 
 /// After the frozen screen / a popup closed: give the freed memory back to the system (glibc keeps it otherwise)
@@ -379,6 +381,9 @@ fn handle(cmd: &str) {
         "pins-clickable" => a.pins_clickable(),
         "copy-lib" => a.copy_lib(arg),
         "pin-lib" => a.pin_lib(arg),
+        // the Library's Share link (24 Nov 2026): a capture by id, a save-folder picture by path
+        "share-lib" => a.share_lib(arg),
+        "share-file" => a.share_file(arg),
         "copy-files" => clipboard::set_files(&arg.split('|').filter(|s| !s.is_empty()).collect::<Vec<_>>()),
         "reload" => a.reload_config(),
         // the tray's "Update to Lasso X": Settings > About installs it

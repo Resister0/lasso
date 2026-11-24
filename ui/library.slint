@@ -22,10 +22,97 @@ export struct LibGroup {
     items: [LibItem],
 }
 
+// one button of a tile's hover bar (dark square, accent on hover)
+component ActBtn inherits Rectangle {
+    in property <string> icon;
+    callback clicked;
+    callback hovered(bool);
+    width: 26px;
+    border-radius: 6px;
+    background: bta.has-hover ? T.accent : #000000b0;
+    Path {
+        width: 15px;
+        height: 15px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke-width: 1.8px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+        stroke: white;
+        commands: root.icon;
+    }
+    bta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        changed has-hover => { root.hovered(self.has-hover); }
+    }
+}
+
+// one line of the right-click menu
+component MenuRow inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    callback clicked;
+    height: 30px;
+    border-radius: 6px;
+    background: mta.has-hover ? T.hover : transparent;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 12px;
+        spacing: 8px;
+        Path {
+            y: (parent.height - self.height) / 2;
+            width: 15px;
+            height: 15px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke-width: 1.8px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            fill: transparent;
+            stroke: T.muted;
+            commands: root.icon;
+        }
+        Text { text: root.text; color: T.text; font-size: 13px; vertical-alignment: center; }
+    }
+    mta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component Tile inherits Rectangle {
     in property <LibItem> it;
+    in property <bool> share-on;
     callback act(string);
     callback pick(bool);
+    // icons (24 x 24, stroked)
+    property <string> i-copy: "M10 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3";
+    property <string> i-link: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7";
+    // the right-click menu (24 Nov 2026, the user: "make each screenshot right clickable then a simple copy button,
+    // but don't remove the button for hovering to copy, both are intuitive")
+    menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 170px;
+        Rectangle {
+            background: T.panel;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: T.line;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000080;
+        }
+        VerticalLayout {
+            padding: 4px;
+            spacing: 1px;
+            MenuRow { text: "Copy"; icon: root.i-copy; clicked => { root.act("copy"); } }
+            if root.share-on: MenuRow { text: root.it.shared ? "Copy link" : "Share link"; icon: root.i-link; clicked => { root.act("share"); } }
+        }
+    }
+    property <length> menu-x;
+    property <length> menu-y;
     // the action bar stays while the mouse is on one of its buttons (they take the hover from the tile)
     property <bool> icon-hov;
     property <bool> hov: ta.has-hover || bar-ta.has-hover || icon-hov;
@@ -39,6 +126,11 @@ component Tile inherits Rectangle {
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 root.pick(e.modifiers.control || e.modifiers.shift);
+            }
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
+                menu.show();
             }
         }
         double-clicked => { root.act("edit"); }
@@ -126,35 +218,14 @@ component Tile inherits Rectangle {
                     changed has-hover => { root.icon-hov = self.has-hover; }
                 }
             }
-            for a in [
-                { id: "edit", icon: "M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3zM13.5 6.5l3 3", tip: "Edit" },
-                { id: "copy", icon: "M10 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3", tip: "Copy" },
-                { id: "saveas", icon: "M12 3v12M7 10l5 5l5-5M4 21h16", tip: "Save as" },
-                { id: "pin", icon: "M12 17v5M5 9l7-7l7 7M8 9v4l-3 4h14l-3-4V9", tip: "Pin" },
-                { id: "folder", icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", tip: "Show in folder" },
-                { id: "delete", icon: "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3", tip: "Delete (to the trash)" },
-            ]: Rectangle {
-                width: 26px;
-                border-radius: 6px;
-                background: ata.has-hover ? T.accent : #000000b0;
-                Path {
-                    width: 15px;
-                    height: 15px;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    stroke-width: 1.8px;
-                    stroke-line-cap: round;
-                    stroke-line-join: round;
-                    fill: transparent;
-                    stroke: white;
-                    commands: a.icon;
-                }
-                ata := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.act(a.id); }
-                    changed has-hover => { root.icon-hov = self.has-hover; }
-                }
-            }
+            ActBtn { icon: "M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3zM13.5 6.5l3 3"; clicked => { root.act("edit"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: root.i-copy; clicked => { root.act("copy"); } hovered(h) => { root.icon-hov = h; } }
+            // Share link (24 Nov 2026): a shared one copies its link
+            if root.share-on: ActBtn { icon: root.i-link; clicked => { root.act("share"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M12 3v12M7 10l5 5l5-5M4 21h16"; clicked => { root.act("saveas"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M12 17v5M5 9l7-7l7 7M8 9v4l-3 4h14l-3-4V9"; clicked => { root.act("pin"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"; clicked => { root.act("folder"); } hovered(h) => { root.icon-hov = h; } }
+            ActBtn { icon: "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"; clicked => { root.act("delete"); } hovered(h) => { root.icon-hov = h; } }
         }
     }
 }
@@ -171,6 +242,8 @@ export global LL {
     in-out property <bool> drag-over;
     in-out property <int> group-by;
     in-out property <bool> searching;
+    // share links switched on: Share link on the tiles + in their right-click menu
+    in-out property <bool> share-on;
 
     callback act(string, string);
     callback pick(string, bool);
@@ -266,6 +339,7 @@ export component LibraryView inherits Rectangle {
                             width: root.tw;
                             height: root.th;
                             it: it;
+                            share-on: LL.share-on;
                             act(a) => { LL.act(a, it.key); }
                             pick(add) => { LL.pick(it.key, add); }
                         }

@@ -1,7 +1,7 @@
 // Settings - "a decent bit of customizability" (the user, 13 Nov 2026), in a mini Aimdot window.
 // Every change is written to config.ini at once and the running Lasso is told to reload (windows_ui.rs).
 
-import { T, Ic, Icon, Find, Btn, Switch, Slider, Opt, Seg, NavBtn, Card, Row, Note, Kbd, ThemeGrid, ThemeCard } from "theme.slint";
+import { T, Ic, Icon, Find, Btn, Switch, Slider, Opt, Seg, NavBtn, Card, Row, Note, Kbd, ThemeGrid, ThemeCard, LogoMark } from "theme.slint";
 import { TitleBar, Edges } from "winframe.slint";
 import { ScrollView } from "std-widgets.slint";
 
@@ -139,6 +139,8 @@ export global SS {
     // the section to scroll to (Aimdot-style page, 21 Nov 2026): capture keys hotkeys done library share appearance start about
     in-out property <string> sec;
     in-out property <string> version;
+    // Windows: no KDE / Plasma / Spectacle texts (the user, 24 Nov 2026)
+    in-out property <bool> win;
     // General
     in-out property <int> enter-does;
     in-out property <bool> always-copy;
@@ -439,16 +441,20 @@ Card {
                             has-switch: true;
                             on: SS.hotkeys-on;
                             toggled(v) => { SS.set("hotkeys", v ? "1" : "0"); }
-                            Note { text: "Off until you turn it on. On KDE, Plasma asks once and then owns the keys: change them later in System Settings > Shortcuts > Lasso. Without hotkeys: click the tray icon, or bind \"lasso --region\" in your desktop's shortcut settings."; }
+                            Note {
+                                text: SS.win ? "Off until you turn it on. Without hotkeys: click the tray icon."
+                                    : "Off until you turn it on. On KDE, Plasma asks once and then owns the keys: change them later in System Settings > Shortcuts > Lasso. Without hotkeys: click the tray icon, or bind \"lasso --region\" in your desktop's shortcut settings.";
+                            }
                             Row {
                                 label: "Want the Print key?";
-                                sub: "it belongs to Spectacle on KDE and to Snipping Tool on Windows - free it there first, then set it here";
+                                sub: SS.win ? "Windows opens Snipping Tool with it - turn that off first, then set it here"
+                                    : "it belongs to Spectacle on KDE - free it there first, then set it here";
                                 Btn { y: (parent.height - self.height) / 2; small: true; text: "Open the system's shortcut settings"; clicked => { SS.act("system-keys"); } }
                             }
                             if SS.hk-note != "": Text { text: SS.hk-note; color: T.muted; font-size: 12.5px; wrap: word-wrap; }
                             for h in SS.hotkeys: Row {
                                 label: h.name;
-                                sub: h.kde != "" ? "KDE uses: " + h.kde : "";
+                                sub: !SS.win && h.kde != "" ? "KDE uses: " + h.kde : "";
                                 KeyChip {
                                     y: (parent.height - self.height) / 2;
                                     text: h.key;
@@ -657,9 +663,10 @@ Card {
                                 sub: "emails, phone numbers, keys: Lasso asks before the upload";
                                 Switch { y: (parent.height - self.height) / 2; on: SS.share-check; toggled(v) => { SS.set("share_check", v ? "1" : "0"); } }
                             }
-                            if SS.share-on: Row {
+                            // Windows copies only the link (no picture + link on one clipboard there): no row
+                            if SS.share-on && !SS.win: Row {
                                 label: "Copy the picture too";
-                                sub: "chat apps paste the picture, text boxes the link (KDE; Windows copies the link)";
+                                sub: "chat apps paste the picture, text boxes the link";
                                 Switch { y: (parent.height - self.height) / 2; on: SS.share-both; toggled(v) => { SS.set("share_copy", v ? "both" : "link"); } }
                             }
                             if SS.share-on: Row {
@@ -731,7 +738,7 @@ Card {
                             PageTitle { title: "About"; sub: "Help, updates and privacy."; }
                             HorizontalLayout {
                             spacing: 14px;
-                            Image { width: 56px; height: 56px; source: @image-url("../assets/icons/lasso.svg"); }
+                            LogoMark { width: 56px; height: 56px; }
                             VerticalLayout {
                                 alignment: center;
                                 Text { text: "Sonela Lasso"; font-size: 22px; font-weight: 700; color: T.text; }
