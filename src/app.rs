@@ -1680,7 +1680,9 @@ impl App {
         let st = e.styles[&sel_tool];
         let (size, color_idx, fill, shadow) = if e.sel.len() == 1 {
             let s = &e.doc.shapes[e.sel[0]];
-            (s.size, PALETTE.iter().position(|p| *p == s.color).map(|p| p as i32).unwrap_or(-1), s.fill, s.shadow)
+            // the lit colour dot: the shape's only when a new colour would change it, else what the next shape gets
+            let idx = if e.colour_goes_to_sel() { PALETTE.iter().position(|p| *p == s.color).map(|p| p as i32).unwrap_or(-1) } else { st.color_idx };
+            (s.size, idx, s.fill, s.shadow)
         } else {
             (st.size, st.color_idx, st.fill, st.shadow)
         };

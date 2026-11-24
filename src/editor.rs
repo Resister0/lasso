@@ -1395,7 +1395,17 @@ impl Editor {
                 }
             }
         }
-        self.apply_sel(|s| s.color = c);
+        if self.colour_goes_to_sel() {
+            self.apply_sel(|s| s.color = c);
+        } else {
+            self.changed();
+        }
+    }
+
+    /// A new colour changes a shape only when the user picked it with Select or is typing in it. A shape just drawn
+    /// stays selected without showing it, so it kept getting the colour meant for the next one (the user, 24 Nov 2026).
+    pub fn colour_goes_to_sel(&self) -> bool {
+        self.tool == Tool::Select || self.typing.is_some()
     }
 
     /// A colour from the picture becomes the drawing colour (no palette dot is lit for it)
@@ -1548,7 +1558,8 @@ impl Editor {
 
     /// Selection outline (picture px) + handle points to show.
     /// The selection outline + handles: only with the Select tool (the user, 20 Nov 2026: a shape just drawn with a
-    /// drawing tool got a cyan box around it). The just-drawn shape stays selected (colour / size changes go to it).
+    /// drawing tool got a cyan box around it). The just-drawn shape stays selected (size changes go to it, a new colour
+    /// is for the next shape: colour_goes_to_sel).
     pub fn sel_frame(&self) -> Option<(R, Vec<(f32, f32)>)> {
         if self.sel.is_empty() || self.tool != Tool::Select {
             return None;
@@ -2024,6 +2035,41 @@ mod tests {
         assert!(e.pixelate);
         e.key(&k("b"));
         assert!(!e.pixelate);
+    }
+
+    /// 24 Nov 2026: a new colour is for the next shape; the one just drawn keeps its colour
+    #[test]
+    fn new_colour_is_for_the_next_shape() {
+        let mut e = ed();
+        pick(&mut e);
+        e.key(&k("a"));
+        let first = e.style().color;
+        e.pointer_down(120.0, 100.0, 1);
+        e.pointer_move(160.0, 130.0);
+        e.pointer_up(160.0, 130.0);
+        let undo_steps = e.undo.len();
+        let other = if first == PALETTE[5] { 6 } else { 5 };
+        e.key(&k(&(other + 1).to_string()));
+        assert_eq!(e.doc.shapes[0].color, first, "the drawn shape keeps its colour");
+        assert_eq!(e.undo.len(), undo_steps, "no undo step for a colour pick");
+        assert_eq!(e.style().color, PALETTE[other]);
+        e.pointer_down(170.0, 100.0, 1);
+        e.pointer_move(200.0, 130.0);
+        e.pointer_up(200.0, 130.0);
+        assert_eq!(e.doc.shapes[1].color, PALETTE[other], "the next shape has the new colour");
+        // picked with Select: the colour does change it
+        e.set_tool(Tool::Select);
+        e.sel = vec![0];
+        e.set_color(2, PALETTE[2]);
+        assert_eq!(e.doc.shapes[0].color, PALETTE[2]);
+        assert_eq!(e.doc.shapes[1].color, PALETTE[other]);
+        // text being typed takes the colour too
+        e.set_tool(Tool::Text);
+        e.pointer_down(130.0, 180.0, 1);
+        e.pointer_up(130.0, 180.0);
+        e.key(&k("H"));
+        e.set_color(3, PALETTE[3]);
+        assert_eq!(e.doc.shapes[2].color, PALETTE[3]);
     }
 
     #[test]
