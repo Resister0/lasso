@@ -3,9 +3,52 @@
 //! X-KDE-DBUS-Restricted-Interfaces - this is what makes the silent, fast capture work. The AppImage path
 //! ($APPIMAGE) is used when Lasso runs as an AppImage.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const APP_ID: &str = "link.sonela.Lasso";
+
+/// A copy built by hand (it runs from cargo's `target` folder), not a release. The user's PC has both (24 Nov 2026):
+/// "Lasso" in the menu = the self-updating AppImage, "Lasso (dev)" = the own build - a hand build never touches the
+/// normal entry or the autostart file.
+fn hand_build_exe(p: &Path) -> bool {
+    p.components().any(|c| c.as_os_str() == "target")
+}
+
+pub fn is_hand_build() -> bool {
+    std::env::var_os("APPIMAGE").is_none() && std::env::current_exe().map(|p| hand_build_exe(&p)).unwrap_or(false)
+}
+
+/// Only one Lasso runs at a time (lasso.lock), so starting the OTHER kind of copy (hand build vs release) would only
+/// poke the running one: ask it to quit and start this one instead. Users' PCs never have a hand build, so nothing
+/// changes there. Test copies (LASSO_HOME) are left alone both ways.
+pub fn take_over_other_copy() {
+    if test_mode() {
+        return;
+    }
+    let mine = is_hand_build();
+    let me = std::process::id();
+    let others: Vec<u32> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&p| p != me)
+        .filter(|p| std::fs::read_to_string(format!("/proc/{p}/comm")).is_ok_and(|c| c.trim() == "lasso"))
+        .filter(|p| std::fs::read(format!("/proc/{p}/environ")).is_ok_and(|e| !e.split(|&b| b == 0).any(|v| v.starts_with(b"LASSO_HOME="))))
+        .filter(|p| std::fs::read_link(format!("/proc/{p}/exe")).is_ok_and(|x| hand_build_exe(&x) != mine))
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    crate::log::line("desktop", &format!("another kind of Lasso copy is running ({}) - asking it to quit", if mine { "the release" } else { "a hand build" }));
+    let _ = crate::ipc::send("quit");
+    for _ in 0..50 {
+        if others.iter().all(|p| !Path::new(&format!("/proc/{p}")).exists()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
 
 fn test_mode() -> bool {
     std::env::var_os("LASSO_HOME").is_some()
@@ -26,6 +69,10 @@ pub fn set_autostart(on: bool) {
         None => std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")),
     };
     let file = cfg.join("autostart").join(format!("{APP_ID}.desktop"));
+    if is_hand_build() {
+        crate::log::line("desktop", "hand build: autostart left as it is (it belongs to the normal Lasso)");
+        return;
+    }
     if !on {
         let _ = std::fs::remove_file(&file);
         return;
@@ -76,17 +123,21 @@ pub fn install() {
         }
     }
     let apps = data_home().join("applications");
-    let file = apps.join(format!("{APP_ID}.desktop"));
+    let dev = is_hand_build();
+    let file = apps.join(if dev { format!("{APP_ID}-dev.desktop") } else { format!("{APP_ID}.desktop") });
+    let (name, generic) = if dev { ("Lasso (dev)", "Your own build from this folder") } else { ("Lasso", "Screenshot tool") };
     let text = format!(
-        "[Desktop Entry]\nType=Application\nName=Lasso\nGenericName=Screenshot tool\nComment=Screenshots with every editing tool right on the frozen screen\nExec=\"{}\" %U\nIcon={APP_ID}\nTerminal=false\nCategories=Graphics;Utility;\nKeywords=screenshot;snip;capture;annotate;\nStartupNotify=false\nX-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2,org.kde.KWin.CaptureScreen\nActions=Region;Full;Window;Library;\n\n[Desktop Action Region]\nName=Capture an area\nExec=\"{0}\" --region\n\n[Desktop Action Full]\nName=Full screenshot\nExec=\"{0}\" --full\n\n[Desktop Action Window]\nName=Capture a window\nExec=\"{0}\" --window\n\n[Desktop Action Library]\nName=Library\nExec=\"{0}\" --library\n",
-        exe.to_string_lossy()
+        "[Desktop Entry]\nType=Application\nName={name}\nGenericName={generic}\nComment=Screenshots with every editing tool right on the frozen screen\nExec=\"{}\" %U\nIcon={APP_ID}\nTerminal=false\nCategories=Graphics;Utility;\nKeywords=screenshot;snip;capture;annotate;\nStartupNotify=false\nX-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2,org.kde.KWin.CaptureScreen\nActions=Region;Full;Window;Library;\n\n[Desktop Action Region]\nName=Capture an area\nExec=\"{0}\" --region\n\n[Desktop Action Full]\nName=Full screenshot\nExec=\"{0}\" --full\n\n[Desktop Action Window]\nName=Capture a window\nExec=\"{0}\" --window\n\n[Desktop Action Library]\nName=Library\nExec=\"{0}\" --library\n",
+        exe.to_string_lossy(),
+        name = name,
+        generic = generic
     );
     if std::fs::read_to_string(&file).map(|s| s == text).unwrap_or(false) {
         return;
     }
     let _ = std::fs::create_dir_all(&apps);
     if std::fs::write(&file, text).is_ok() {
-        crate::log::line("desktop", "wrote the .desktop file (KWin screenshot permission + menu entry)");
+        crate::log::line("desktop", &format!("wrote {} (KWin screenshot permission + menu entry)", file.display()));
         // KWin finds the permission through KDE's app cache (ksycoca): refresh it now rather than on its own time
         if !test_mode() { let _ = std::process::Command::new("kbuildsycoca6").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
     }
@@ -102,4 +153,18 @@ pub fn install() {
     let d = data_home().join("icons/hicolor/scalable/apps");
     let _ = std::fs::create_dir_all(&d);
     let _ = std::fs::write(d.join(format!("{APP_ID}.svg")), include_bytes!("../assets/icons/lasso.svg"));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn hand_build_is_told_from_a_release() {
+        assert!(super::hand_build_exe(Path::new("/src/Lasso/target/release/lasso")));
+        assert!(super::hand_build_exe(Path::new("/work/lasso/target/debug/lasso")));
+        assert!(!super::hand_build_exe(Path::new("/data/.local/share/lasso/bin/lasso")));
+        assert!(!super::hand_build_exe(Path::new("/tmp/.mount_LassoX1/usr/bin/lasso")));
+        assert!(!super::hand_build_exe(Path::new("/opt/apps/Lasso.AppImage")));
+    }
 }

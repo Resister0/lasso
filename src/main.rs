@@ -687,6 +687,9 @@ fn main() {
     win::allow_foreground();
     // a new AppImage started by an update: the old Lasso quits first
     update::wait_for_old();
+    // the user's PC: the release and a hand build ("Lasso (dev)") - starting one replaces the other
+    #[cfg(target_os = "linux")]
+    desktop::take_over_other_copy();
     // already running: just tell it
     if let Ok(r) = ipc::send(cmd.as_deref().unwrap_or("ping")) {
         if r == "ok" {

@@ -725,7 +725,7 @@ Card {
                             }
                             Row {
                                 label: "Sounds";
-                                sub: "a soft click when the screen freezes, a chime when copied / saved";
+                                sub: "a camera shutter when a picture is copied / saved";
                                 Switch { y: (parent.height - self.height) / 2; on: SS.sounds; toggled(v) => { SS.set("sounds", v ? "1" : "0"); } }
                             }
                         }

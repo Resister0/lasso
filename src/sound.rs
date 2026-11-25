@@ -1,5 +1,10 @@
-//! Optional sounds (Settings > General, off by default): a soft click when the screen freezes, a short chime when a
-//! picture is copied / saved. Made in code (no sound files), played by the desktop's own player in the background.
+//! Optional sounds (Settings > Start, off by default): a camera shutter when a picture is copied / saved; the screen
+//! freezing is silent.
+//! 25 Nov 2026: were sine chimes made in code - the done one was Echo's "clip saved" notes (880 + 1320 Hz), so with
+//! both apps running the user couldn't tell which one made the sound. Sounds made in code didn't sound right either
+//! (tried shutter clicks, pop, marimba, glass); the user picked the desktop's own "camera-shutter" (freedesktop sound
+//! theme, the same one screenshot tools use). Linux: that file, played by the desktop's player; Windows: the system
+//! "asterisk" sound.
 
 #[derive(Clone, Copy)]
 pub enum Snd {
@@ -8,77 +13,95 @@ pub enum Snd {
 }
 
 pub fn play(s: Snd) {
-    if !crate::config::Config::load().on("sounds") {
+    if matches!(s, Snd::Freeze) || !crate::config::Config::load().on("sounds") {
         return;
     }
     #[cfg(target_os = "linux")]
-    {
-        let (name, notes): (&str, &[(f32, f32)]) = match s {
-            Snd::Freeze => ("lasso-freeze.wav", &[(1400.0, 0.025)]),
-            Snd::Done => ("lasso-done.wav", &[(880.0, 0.06), (1320.0, 0.09)]),
-        };
-        let path = crate::paths::runtime_dir().join(name);
-        if !path.exists() {
-            let _ = std::fs::write(&path, wav(notes));
-        }
-        std::thread::spawn(move || {
-            for player in ["pw-play", "paplay", "aplay"] {
-                if std::process::Command::new(player).arg(&path).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok() {
-                    break;
+    std::thread::spawn(|| {
+        let quiet = |c: &mut std::process::Command| c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|st| st.success()).unwrap_or(false);
+        if let Some(f) = theme_file("camera-shutter") {
+            for player in ["pw-play", "paplay"] {
+                if quiet(std::process::Command::new(player).arg(&f)) {
+                    return;
                 }
             }
-        });
-    }
+        }
+        // no sound file found (or no player that reads .oga): libcanberra finds the theme's sound by its name
+        let _ = quiet(std::process::Command::new("canberra-gtk-play").args(["-i", "camera-shutter"]));
+    });
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONASTERISK, MB_OK};
-        MessageBeep(match s {
-            Snd::Freeze => MB_OK,
-            Snd::Done => MB_ICONASTERISK,
-        });
+        use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONASTERISK;
+        MessageBeep(MB_ICONASTERISK);
     }
 }
 
-/// 16-bit mono 44.1 kHz WAV of soft sine notes (fade in / out, quiet)
-#[cfg_attr(windows, allow(dead_code))]
-fn wav(notes: &[(f32, f32)]) -> Vec<u8> {
-    let rate = 44100u32;
-    let mut pcm: Vec<i16> = vec![];
-    for (f, secs) in notes {
-        let n = (rate as f32 * secs) as usize;
-        for i in 0..n {
-            let t = i as f32 / rate as f32;
-            let env = (i.min(n - i) as f32 / (rate as f32 * 0.006)).min(1.0);
-            pcm.push(((2.0 * std::f32::consts::PI * f * t).sin() * env * 0.18 * i16::MAX as f32) as i16);
+/// A sound from the installed sound themes (freedesktop naming spec): `<data dir>/sounds/<theme>/stereo/<name>.oga`.
+/// The freedesktop theme first (it has camera-shutter; KDE's Ocean doesn't), then any other theme.
+#[cfg(target_os = "linux")]
+fn theme_file(name: &str) -> Option<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = vec![];
+    if let Some(h) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        dirs.push(h.into());
+    } else if let Some(h) = std::env::var_os("HOME") {
+        dirs.push(std::path::PathBuf::from(h).join(".local/share"));
+    }
+    let sys = std::env::var("XDG_DATA_DIRS").unwrap_or_default();
+    dirs.extend(sys.split(':').filter(|d| !d.is_empty()).map(std::path::PathBuf::from));
+    // an AppImage can change XDG_DATA_DIRS: always look in the usual system folders too
+    dirs.push("/usr/share".into());
+    dirs.push("/usr/local/share".into());
+    theme_file_in(&dirs, name)
+}
+
+#[cfg(target_os = "linux")]
+fn theme_file_in(dirs: &[std::path::PathBuf], name: &str) -> Option<std::path::PathBuf> {
+    let exts = ["oga", "ogg", "wav"];
+    for d in dirs {
+        for e in exts {
+            let p = d.join("sounds/freedesktop/stereo").join(format!("{name}.{e}"));
+            if p.is_file() {
+                return Some(p);
+            }
         }
     }
-    let data_len = (pcm.len() * 2) as u32;
-    let mut out = Vec::with_capacity(44 + data_len as usize);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&(rate * 2).to_le_bytes());
-    out.extend_from_slice(&2u16.to_le_bytes());
-    out.extend_from_slice(&16u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
-    for s in pcm {
-        out.extend_from_slice(&s.to_le_bytes());
+    for d in dirs {
+        let Ok(themes) = std::fs::read_dir(d.join("sounds")) else { continue };
+        for t in themes.flatten() {
+            for e in exts {
+                let p = t.path().join("stereo").join(format!("{name}.{e}"));
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
     }
-    out
+    None
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     #[test]
-    fn wav_header() {
-        let w = super::wav(&[(1000.0, 0.01)]);
-        assert_eq!(&w[0..4], b"RIFF");
-        assert_eq!(w.len(), 44 + 441 * 2);
+    fn finds_freedesktop_first_then_other_themes() {
+        let base = std::env::temp_dir().join(format!("lasso-sound-test-{}", std::process::id()));
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(a.join("sounds/ocean/stereo")).unwrap();
+        std::fs::create_dir_all(b.join("sounds/freedesktop/stereo")).unwrap();
+        std::fs::write(a.join("sounds/ocean/stereo/camera-shutter.oga"), b"x").unwrap();
+        std::fs::write(b.join("sounds/freedesktop/stereo/camera-shutter.oga"), b"x").unwrap();
+        let dirs = [a.clone(), b.clone()];
+        assert_eq!(super::theme_file_in(&dirs, "camera-shutter"), Some(b.join("sounds/freedesktop/stereo/camera-shutter.oga")));
+        std::fs::remove_dir_all(b.join("sounds/freedesktop")).unwrap();
+        assert_eq!(super::theme_file_in(&dirs, "camera-shutter"), Some(a.join("sounds/ocean/stereo/camera-shutter.oga")));
+        assert_eq!(super::theme_file_in(&dirs, "nope"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn this_pc_has_the_shutter() {
+        // informational: prints where the sound would come from on the machine running the tests
+        eprintln!("camera-shutter: {:?}", super::theme_file("camera-shutter"));
     }
 }
