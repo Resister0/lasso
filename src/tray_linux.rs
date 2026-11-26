@@ -264,7 +264,7 @@ fn answer(msg: &Message, send: &Arc<dyn Fn(&str) + Send + Sync>, restore: &Share
             r.append1(v)
         }
         (SNI, "Activate") => {
-            send("region");
+            send("flyout");
             r
         }
         (SNI, "SecondaryActivate") => {

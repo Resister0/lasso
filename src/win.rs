@@ -615,7 +615,7 @@ unsafe extern "system" fn tray_proc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> 
     if msg == WM_TRAY {
         let ev = (l & 0xffff) as u32;
         if ev == WM_LBUTTONUP {
-            tray_send("region");
+            tray_send("flyout");
         } else if ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU {
             let m = CreatePopupMenu();
             if let Some(u) = TRAY_UPDATE.lock().unwrap().clone() {
