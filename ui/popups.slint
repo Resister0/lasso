@@ -291,3 +291,244 @@ export component ScrollPopup inherits Window {
         }
     }
 }
+
+// The tray flyout (the user, 26 Nov 2026: "make Lasso more of a mini bar extension, at least the library part"): a
+// left-click on the tray icon opens it right above the tray. Capture buttons on top, the latest captures in their own
+// shape (rows that fill the width, worked out in Rust: app.rs flyout_rows), click = copy, drag = take it out, and the
+// full Library / Settings one click away. Esc or a click anywhere else closes it.
+export struct FlyPic {
+    img: image,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    ago: string,
+}
+
+// one line of the flyout for what the old tray menu had (Restore last capture, pins, an update)
+component FlyRow inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> accent;
+    callback clicked;
+    height: 34px;
+    border-radius: 8px;
+    background: root.accent ? (rta.has-hover ? B.accent.with-alpha(0.32) : B.accent.with-alpha(0.2)) : rta.has-hover ? B.hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 9px;
+        Ico { y: (parent.height - self.height) / 2; commands: root.icon; stroke: root.accent ? B.accent : B.muted; }
+        Text { text: root.text; color: root.accent ? B.accent : B.text; font-size: 13px; font-weight: root.accent ? 600 : 400; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+    }
+    rta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component Flyout inherits Window {
+    no-frame: true;
+    title: "Lasso";
+    background: transparent;
+    in property <[FlyPic]> pics;
+    // height of all the picture rows (the list scrolls when it's more than the room it gets)
+    in property <length> grid-h;
+    // the "capture an area" hotkey to show on the button ("" = none)
+    in property <string> cap-key;
+    // the picture that was just copied (-1 = none) + a short note ("Copied", "Dropped", an error)
+    in property <int> flash: -1;
+    in property <string> flash-text;
+    in property <bool> can-drag: true;
+    // the Capture area button's background (painted in Rust: gradient + round corners)
+    in property <image> cap-bg;
+    // the old tray menu's "Update to Lasso X" ("" = none out)
+    in property <string> update-label;
+    in property <string> restore-label;
+    in property <bool> pins-through;
+    callback act(string);
+    callback pick(int);
+    callback drag-out(int);
+    property <bool> dragging;
+    forward-focus: fs;
+    fs := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape { root.act("close"); return accept; }
+            reject
+        }
+    }
+    Rectangle {
+        x: 6px;
+        y: 6px;
+        width: root.width - 12px;
+        height: root.height - 12px;
+        border-radius: 14px;
+        background: B.bar;
+        border-width: 1px;
+        border-color: B.line;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: #00000090;
+        clip: true;
+        VerticalLayout {
+            // title row: logo, name, Library + Settings
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 10px;
+                padding-top: 10px;
+                padding-bottom: 8px;
+                spacing: 8px;
+                height: 50px;
+                Logo { y: (parent.height - self.height) / 2; width: 22px; height: 22px; }
+                Text { text: "Lasso"; color: B.text; font-size: 14px; font-weight: 700; vertical-alignment: center; horizontal-stretch: 1; }
+            }
+            // capture: a big "area" button, then full screen and a window
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-bottom: 12px;
+                spacing: 8px;
+                height: 48px;
+                // the bars' primary gradient (BarBtn), in a button that fills the row. The software renderer draws a
+                // gradient with square corners (a rounded clip doesn't help either), so Rust paints it - round corners
+                // included - into `cap-bg` (app.rs rounded_gradient, 26 Nov 2026)
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 36px;
+                    Image { width: parent.width; height: parent.height; source: root.cap-bg; image-fit: fill; }
+                    if cta.has-hover: Image { width: parent.width; height: parent.height; source: root.cap-bg; image-fit: fill; opacity: 0.35; colorize: white; }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 7px;
+                        Ico { y: (parent.height - self.height) / 2; commands: I.area; stroke: B.on-accent; }
+                        Text { text: "Capture area"; color: B.on-accent; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+                    }
+                    cta := TouchArea { mouse-cursor: pointer; clicked => { root.act("region"); } }
+                }
+                Rectangle {
+                    // fixed: Capture area's painted background is made for the width that's left (app.rs)
+                    width: 100px;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: B.line;
+                    BarBtn { width: parent.width; height: 36px; border-radius: 9px; icon: I.monitor; text: "Screen"; clicked => { root.act("full"); } }
+                }
+                Rectangle {
+                    // fixed: Capture area's painted background is made for the width that's left (app.rs)
+                    width: 100px;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: B.line;
+                    BarBtn { width: parent.width; height: 36px; border-radius: 9px; icon: I.window; text: "Window"; clicked => { root.act("window"); } }
+                }
+            }
+            if root.update-label != "" || root.restore-label != "" || root.pins-through: VerticalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-bottom: 6px;
+                if root.update-label != "": FlyRow { icon: I.update; text: root.update-label; accent: true; clicked => { root.act("update"); } }
+                if root.restore-label != "": FlyRow { icon: I.restore; text: root.restore-label; clicked => { root.act("restore"); } }
+                if root.pins-through: FlyRow { icon: I.pin; text: "Make pins clickable again"; clicked => { root.act("pins-clickable"); } }
+            }
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                height: 24px;
+                Text { text: "RECENT"; color: B.dim; font-size: 11px; font-weight: 700; letter-spacing: 0.9px; vertical-alignment: center; horizontal-stretch: 1; }
+                if root.pics.length > 0: Text { text: root.can-drag ? "click to copy · drag out" : "click to copy"; color: B.dim; font-size: 11px; vertical-alignment: center; }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                if root.pics.length == 0: Text {
+                    text: "Nothing here yet - your captures show up here.";
+                    color: B.muted;
+                    font-size: 12.5px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Flickable {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    content-height: root.grid-h;
+                    for p[i] in root.pics: Rectangle {
+                        x: p.x;
+                        y: p.y;
+                        width: p.w;
+                        height: p.h;
+                        border-radius: 7px;
+                        clip: true;
+                        background: B.panel2;
+                        Image { width: parent.width; height: parent.height; source: p.img; image-fit: cover; }
+                        Rectangle { border-radius: 7px; border-width: 1px; border-color: B.line; }
+                        pta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            pointer-event(ev) => {
+                                if ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left { root.dragging = false; }
+                            }
+                            moved => {
+                                if root.can-drag && self.pressed && !root.dragging
+                                    && (abs(self.mouse-x - self.pressed-x) > 6px || abs(self.mouse-y - self.pressed-y) > 6px) {
+                                    root.dragging = true;
+                                    root.drag-out(i);
+                                }
+                            }
+                            clicked => { if !root.dragging { root.pick(i); } }
+                        }
+                        if pta.has-hover && root.flash != i: Rectangle {
+                            border-radius: 7px;
+                            border-width: 2px;
+                            border-color: B.accent;
+                            Rectangle {
+                                x: 5px;
+                                y: parent.height - self.height - 5px;
+                                width: at.preferred-width + 10px;
+                                height: 18px;
+                                border-radius: 5px;
+                                background: #000000a8;
+                                at := Text { text: p.ago; color: white; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        if root.flash == i: Rectangle {
+                            background: B.accent.with-alpha(0.82);
+                            Text { text: root.flash-text; color: white; font-size: 13px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; width: parent.width - 8px; }
+                        }
+                    }
+                }
+            }
+            Rectangle { height: 8px; }
+            // Library + Settings (only here - 26 Nov 2026, not twice)
+            Rectangle {
+                height: 1px;
+                background: B.line;
+            }
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 8px;
+                height: 56px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: B.line;
+                    BarBtn { width: parent.width; height: parent.height; border-radius: 9px; icon: I.library; text: "Open Library"; clicked => { root.act("library"); } }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: B.line;
+                    BarBtn { width: parent.width; height: parent.height; border-radius: 9px; icon: I.gear; text: "Settings"; clicked => { root.act("settings"); } }
+                }
+            }
+        }
+    }
+}
+
+// Behind the tray flyout on every monitor (Linux): see-through, catches the click outside it, which closes it
+export component FlyCatch inherits Window {
+    no-frame: true;
+    title: "Lasso";
+    background: transparent;
+    callback clicked();
+    TouchArea {
+        pointer-event(ev) => {
+            if ev.kind == PointerEventKind.down { root.clicked(); }
+        }
+    }
+}

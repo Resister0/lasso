@@ -5,7 +5,7 @@
 //!   `update.ini` next to config.ini (the running Lasso and the Settings window both read it).
 //! - The running Lasso checks in a background thread: a first look a minute after start, then every 4 h (it sleeps in
 //!   between - nothing wakes up while idle except this thread every few hours); a failed check is tried again after
-//!   15 min. A known update puts "Update to Lasso X" in the tray menu; a click opens Settings > About, which installs it.
+//!   15 min. A known update puts "Update to Lasso X" in the tray menu; a click opens Settings > Updates, which installs it.
 //! - Install (Settings window): download `url`, check its minisign signature (`signature` = base64 of the .minisig
 //!   text, Tauri signer format) against Lasso's own updater key built in at compile time. Nothing that doesn't verify
 //!   is ever installed. Windows installed copy (uninstall.exe next to lasso.exe): `Lasso-Setup.exe /P /R /UPDATE`
@@ -84,7 +84,7 @@ fn with_channel(url: String, channel: &str) -> String {
     }
 }
 
-// ----- update channels (21 Nov 2026, Echo's / Aimdot's method): Settings > About > Updates > Update channel -----
+// ----- update channels (21 Nov 2026, Echo's / Aimdot's method): Settings > Updates > Update channel -----
 // stable = the normal releases; beta = new versions a little earlier (sonela.app offers the newest of stable + beta);
 // dev = testers, needs the code from the developer (header x-sonela-code; a wrong code = stable). Kept in channel.ini
 // next to config.ini: `channel=<stable|beta|dev>`, `code=<dev code>`. No file = stable.
@@ -345,7 +345,12 @@ pub fn start(changed: impl Fn(Option<String>) + Send + 'static) {
     });
 }
 
-/// Settings > About opens with "install now" (the tray's "Update to Lasso X"); `open` starts the Settings window
+/// The Settings window was opened by the tray's "Update to Lasso X" (it then opens at Updates)
+pub fn install_asked() -> bool {
+    std::env::var_os(INSTALL_ENV).is_some()
+}
+
+/// Settings > Updates opens with "install now" (the tray's "Update to Lasso X"); `open` starts the Settings window
 pub fn open_settings_and_install(open: impl FnOnce()) {
     std::env::set_var(INSTALL_ENV, "1");
     open();
@@ -420,7 +425,7 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new(opener).arg(url).spawn();
 }
 
-/// What Settings > About > Updates shows
+/// What Settings > Updates shows
 #[derive(Clone, Debug, Default)]
 pub struct View {
     /// a newer version is known

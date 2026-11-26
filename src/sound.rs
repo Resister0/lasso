@@ -1,4 +1,4 @@
-//! Optional sounds (Settings > Start, off by default): a camera shutter when a picture is copied / saved; the screen
+//! Optional sounds (Settings > Saving & copying > Camera sound, off by default): a camera shutter when a picture is copied / saved; the screen
 //! freezing is silent.
 //! 25 Nov 2026: were sine chimes made in code - the done one was Echo's "clip saved" notes (880 + 1320 Hz), so with
 //! both apps running the user couldn't tell which one made the sound. Sounds made in code didn't sound right either

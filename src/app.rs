@@ -6,7 +6,7 @@ use crate::editor::{Editor, Fx, Mode, Phase, View, PALETTE};
 use crate::keys::{self, KeyEv, Keymap};
 use crate::library;
 use crate::shapes::{Kind, Pic, Tool, R};
-use crate::{Hello, Overlay, Pin, RestorePopup, ScrollPopup, Thumb};
+use crate::{FlyCatch, Flyout, Hello, Overlay, Pin, RestorePopup, ScrollPopup, Thumb};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -75,6 +75,113 @@ struct PinWin {
     grab: (f32, f32),
     /// clicks go through it (a map over a game); the tray / `lasso --cmd pins-clickable` turns it off
     through: bool,
+}
+
+/// The tray flyout: the latest captures (their library ids, in the order shown) + the see-through click catchers
+/// behind it on every monitor (Linux)
+struct FlyWin {
+    f: Flyout,
+    win: u32,
+    /// per picture: a library id, or a game screenshot's file (gamepics.rs)
+    ids: Vec<FlyItem>,
+    catchers: Vec<FlyCatch>,
+    dragging: bool,
+}
+
+#[derive(Clone)]
+enum FlyItem {
+    Lib(String),
+    File(std::path::PathBuf),
+}
+
+/// Rows of pictures that fill `width` exactly, each row about `target` high (Google-Photos style): pictures keep
+/// their shape. In: (w, h) per picture. Out: (x, y, w, h) per picture + the height of all rows.
+pub fn flyout_rows(sizes: &[(u32, u32)], width: f32, target: f32, gap: f32) -> (Vec<(f32, f32, f32, f32)>, f32) {
+    let mut out = vec![];
+    let mut y = 0.0;
+    let mut row: Vec<f32> = vec![];
+    let flush = |row: &mut Vec<f32>, h: f32, y: &mut f32, out: &mut Vec<(f32, f32, f32, f32)>| {
+        let mut x = 0.0;
+        for ar in row.drain(..) {
+            let w = (h * ar).floor();
+            out.push((x, *y, w, h.round()));
+            x += w + gap;
+        }
+        *y += h.round() + gap;
+    };
+    for &(w, h) in sizes {
+        // very tall or very wide pictures are shown as if they were less extreme (cropped a little by "cover")
+        row.push((w.max(1) as f32 / h.max(1) as f32).clamp(0.75, 3.2));
+        let sum: f32 = row.iter().sum();
+        let h = (width - gap * (row.len() - 1) as f32) / sum;
+        if h <= target {
+            flush(&mut row, h, &mut y, &mut out);
+        }
+    }
+    if !row.is_empty() {
+        flush(&mut row, target, &mut y, &mut out);
+    }
+    (out, (y - gap).max(0.0))
+}
+
+/// A rounded box filled with a 135-degree gradient (Slint's software renderer draws gradients with square corners):
+/// `w` x `h` px, corner radius `r`, colour stops (position 0..1, colour). Edges are smoothed.
+pub fn rounded_gradient(w: u32, h: u32, r: f32, stops: &[(f32, slint::Color)]) -> Image {
+    let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+    let (wf, hf) = (w as f32, h as f32);
+    let px = buf.make_mut_slice();
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            // CSS 135deg: top-left -> bottom-right
+            let t = ((fx + fy) / (wf + hf)).clamp(0.0, 1.0);
+            let mut c = stops[0].1;
+            for pair in stops.windows(2) {
+                let ((a, ca), (b, cb)) = (pair[0], pair[1]);
+                if t >= a && t <= b {
+                    let k = if b > a { (t - a) / (b - a) } else { 0.0 };
+                    let mix = |p: u8, q: u8| (p as f32 + (q as f32 - p as f32) * k).round() as u8;
+                    c = slint::Color::from_argb_u8(255, mix(ca.red(), cb.red()), mix(ca.green(), cb.green()), mix(ca.blue(), cb.blue()));
+                }
+            }
+            if t > stops[stops.len() - 1].0 {
+                c = stops[stops.len() - 1].1;
+            }
+            // distance outside the rounded corner -> coverage
+            let dx = (r - fx).max(fx - (wf - r)).max(0.0);
+            let dy = (r - fy).max(fy - (hf - r)).max(0.0);
+            let cover = if dx > 0.0 && dy > 0.0 { (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0) } else { 1.0 };
+            let a = (cover * 255.0).round() as u8;
+            px[(y * w + x) as usize] = Rgba8Pixel { r: c.red(), g: c.green(), b: c.blue(), a };
+        }
+    }
+    Image::from_rgba8(buf)
+}
+
+/// "3 min", "2 h", "yesterday", "5 days" - how long ago a capture was made
+fn ago(secs: i64) -> String {
+    match secs {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{} min", s / 60),
+        s if s < 86400 => format!("{} h", s / 3600),
+        s if s < 2 * 86400 => "yesterday".into(),
+        s => format!("{} days", s / 86400),
+    }
+}
+
+/// The "capture an area" hotkey as the user sees it ("" = none): KDE's own shortcut on Linux, Lasso's on Windows
+fn region_key_label(cfg: &Config) -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string(crate::paths::config_dir().join("kde_keys.txt")) {
+        if let Some(v) = s.lines().find_map(|l| l.strip_prefix("region=")) {
+            return v.trim().to_string();
+        }
+    }
+    if cfg.on("hotkeys") {
+        cfg.get("hk.region").to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// The corner thumbnail after a capture (quick access overlay): drag out, copy, save, pin, edit, delete
@@ -146,6 +253,10 @@ pub struct App {
     hello: Option<Hello>,
     scrolling: Option<Scrolling>,
     thumb: Option<ThumbWin>,
+    /// the tray flyout (left-click on the tray icon) and when it last closed
+    fly: Option<FlyWin>,
+    fly_closed: Option<Instant>,
+    fly_timer: slint::Timer,
     /// the last finished capture (id, saved files, when) for the "Delete the last capture" key
     last_out: Option<(String, Vec<String>, std::time::Instant)>,
     thumb_timer: slint::Timer,
@@ -233,6 +344,9 @@ impl App {
             hello: None,
             scrolling: None,
             thumb: None,
+            fly: None,
+            fly_closed: None,
+            fly_timer: slint::Timer::default(),
             last_out: None,
             thumb_timer: slint::Timer::default(),
             toast_timer: slint::Timer::default(),
@@ -424,6 +538,7 @@ impl App {
         if self.showing || self.scrolling.is_some() {
             return;
         }
+        self.hide_flyout();
         let delay = if with_delay { self.cfg.num("delay").clamp(0, 30) } else { 0 };
         if delay > 0 {
             let me = self.me.clone();
@@ -1107,6 +1222,12 @@ impl App {
     }
 
     pub fn key_for_win(&mut self, win: u32, ev: KeyEv, pressed: bool) {
+        if self.fly.as_ref().is_some_and(|f| f.win == win) {
+            if pressed && (ev.is("Escape") || (ev.ctrl && ev.is("w"))) {
+                self.hide_flyout();
+            }
+            return;
+        }
         if let Some(p) = self.pins.iter().position(|p| p.win == win) {
             if pressed && ev.plain() && (ev.is("t") || (!ev.key.is_ascii() && ev.phys == Some('t'))) {
                 // T: click-through (pin a map / build order over a game); see-through follows Ctrl+wheel
@@ -1930,6 +2051,257 @@ impl App {
     // ---------------------------------------------------------------------------------------------------------
     // Popups: Esc restore (first time), thumbnail, pins
 
+    /// Left-click on the tray icon: open the flyout, or close it when it's open. A click on the tray icon while it's
+    /// open first closes it (Windows: the window lost focus) - that same click must not open it again.
+    pub fn toggle_flyout(&mut self) {
+        if self.fly.is_some() {
+            return self.hide_flyout();
+        }
+        if self.fly_closed.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(350)) {
+            return;
+        }
+        self.show_flyout();
+    }
+
+    fn show_flyout(&mut self) {
+        if self.showing || self.scrolling.is_some() {
+            return;
+        }
+        self.hide_popups();
+        const W: i32 = 452; // 440 + 6 px shadow room on each side (26 Nov 2026: "a slight bit wider")
+        const GRID_W: f32 = 440.0 - 24.0;
+        const N: usize = 18;
+        // the newest captures + the newest game screenshots (Steam / added folders), newest first
+        let mut items: Vec<(i64, FlyItem, std::path::PathBuf)> = library::recent(N).into_iter().map(|it| (it.created, FlyItem::Lib(it.id), it.thumb)).collect();
+        let mut games = crate::gamepics::all(&self.cfg);
+        games.sort_by(|a, b| b.created.cmp(&a.created));
+        for g in games.into_iter().take(N) {
+            if let Some(t) = crate::gamepics::small_thumb(&g) {
+                items.push((g.created, FlyItem::File(g.path), t));
+            }
+        }
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        items.truncate(N);
+        let mut pics = vec![];
+        let mut ids = vec![];
+        let mut sizes = vec![];
+        let now = crate::util::unix_now();
+        for (created, id, thumb) in items {
+            let Ok(img) = Image::load_from_path(&thumb) else { continue };
+            let sz = img.size();
+            if sz.width == 0 || sz.height == 0 {
+                continue;
+            }
+            sizes.push((sz.width, sz.height));
+            pics.push((img, ago(now - created)));
+            ids.push(id);
+        }
+        let (rects, grid_h) = flyout_rows(&sizes, GRID_W, 96.0, 6.0);
+        let model: Vec<crate::FlyPic> = pics
+            .into_iter()
+            .zip(rects)
+            .map(|((img, ago), (x, y, w, h))| crate::FlyPic { img, x: x.into(), y: y.into(), w: w.into(), h: h.into(), ago: sh(ago) })
+            .collect();
+        let grid_room = if model.is_empty() { 80.0 } else { grid_h.min(400.0) };
+        // what the old tray menu had, only when it applies
+        // what the old tray menu had, only when it applies
+        let restore = self.has_restore().map(crate::restore_label).unwrap_or_default();
+        let pins_through = self.pins.iter().any(|p| p.through);
+        let update = crate::update::tray_label().unwrap_or_default();
+        let extra_rows = [!restore.is_empty(), pins_through, !update.is_empty()].iter().filter(|x| **x).count();
+        let extras = if extra_rows > 0 { extra_rows as f32 * 34.0 + 6.0 } else { 0.0 };
+        // shadow 12 + title 50 + capture 48 + extras + "RECENT" 24 + pictures + 8 + line 1 + bottom buttons 56
+        let h = (12.0 + 50.0 + 48.0 + extras + 24.0 + grid_room + 8.0 + 1.0 + 56.0) as i32;
+        // Linux: a see-through layer on every monitor catches the click outside (it closes the flyout); made first,
+        // so the flyout is above it
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut catchers = vec![];
+        #[cfg(target_os = "linux")]
+        if crate::wl::active() {
+            for o in crate::wl::outputs() {
+                let s = crate::wl::Spec { place: crate::wl::Place::Fill { output: o.reg }, keyboard: 0, namespace: "lasso-flycatch" };
+                let (c, _) = crate::wl::create(s, FlyCatch::new);
+                if let Ok(c) = c {
+                    c.on_clicked(|| {
+                        let _ = slint::invoke_from_event_loop(|| crate::with_app(|a| a.hide_flyout()));
+                    });
+                    let _ = c.show();
+                    catchers.push(c);
+                }
+            }
+        }
+        let Ok((f, win)) = crate::make_popup(Self::popup_spec(W, h, 1), Flyout::new) else { return };
+        crate::set_bars_look(&f.global::<crate::B>(), self.cfg.dark());
+        {
+            // Capture area: 440 - 2 x 12 padding - 2 x (8 + 100) for Screen / Window = 200 x 36, painted at 2x
+            let b = f.global::<crate::B>();
+            f.set_cap_bg(rounded_gradient(400, 72, 18.0, &[(0.0, b.get_accent2()), (0.55, b.get_accent()), (1.0, b.get_accent3())]));
+        }
+        f.set_pics(ModelRc::new(VecModel::from(model)));
+        f.set_grid_h(grid_h.into());
+        f.set_cap_key(sh(region_key_label(&self.cfg)));
+        f.set_can_drag(crate::can_drag_out());
+        f.set_update_label(sh(update));
+        f.set_restore_label(sh(restore));
+        f.set_pins_through(pins_through);
+        f.on_act(|what| {
+            let what = what.to_string();
+            // after this callback: the actions close the flyout (destroying the component it runs in)
+            let _ = slint::invoke_from_event_loop(move || crate::with_app(|a| a.fly_act(&what)));
+        });
+        f.on_pick(|i| crate::with_app(|a| a.fly_pick(i as usize)));
+        f.on_drag_out(|i| crate::with_app(|a| a.fly_drag(i as usize)));
+        // no layer shell (Windows, other desktops): a normal window that closes when it loses focus
+        if win == 0 {
+            use slint::winit_030::{winit, EventResult, WinitWindowAccessor};
+            f.window().on_winit_window_event(|_, ev| {
+                if let winit::event::WindowEvent::Focused(false) = ev {
+                    let _ = slint::invoke_from_event_loop(|| {
+                        crate::with_app(|a| {
+                            if !a.fly.as_ref().is_some_and(|f| f.dragging) {
+                                a.hide_flyout();
+                            }
+                        })
+                    });
+                }
+                EventResult::Propagate
+            });
+        }
+        let _ = f.show();
+        if win == 0 {
+            use slint::winit_030::WinitWindowAccessor;
+            f.window().with_winit_window(|w| w.focus_window());
+        }
+        crate::log::line("flyout", &format!("open: {} pictures", ids.len()));
+        self.fly = Some(FlyWin { f, win, ids, catchers, dragging: false });
+    }
+
+    pub fn hide_flyout(&mut self) {
+        self.fly_timer.stop();
+        if let Some(f) = self.fly.take() {
+            for c in &f.catchers {
+                let _ = c.hide();
+            }
+            let _ = f.f.hide();
+            self.fly_closed = Some(Instant::now());
+        }
+    }
+
+    fn fly_act(&mut self, what: &str) {
+        self.hide_flyout();
+        match what {
+            "region" | "full" | "window" => {
+                // a moment later, so the flyout is gone from the screen before it's captured
+                let cmd = what.to_string();
+                slint::Timer::single_shot(std::time::Duration::from_millis(150), move || crate::handle(&cmd));
+            }
+            "library" => self.open_window("--library-window"),
+            "settings" => self.open_window("--settings-window"),
+            "restore" => self.restore(),
+            "pins-clickable" => self.pins_clickable(),
+            "update" | "quit" => {
+                let cmd = what.to_string();
+                slint::Timer::single_shot(std::time::Duration::from_millis(50), move || crate::handle(&cmd));
+            }
+            _ => {}
+        }
+    }
+
+    /// A short note on a picture of the flyout ("Copied", "Dropped", an error), gone after a moment
+    fn fly_flash(&mut self, i: usize, text: &str) {
+        let Some(f) = self.fly.as_ref() else { return };
+        f.f.set_flash(i as i32);
+        f.f.set_flash_text(sh(text));
+        let me = self.me.clone();
+        self.fly_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(1100), move || {
+            if let Some(a) = me.upgrade() {
+                if let Some(f) = a.borrow().fly.as_ref() {
+                    f.f.set_flash(-1);
+                }
+            }
+        });
+    }
+
+    /// Click on a picture: copy it (the finished picture - box + drawings - like the Library's Copy); the flyout stays
+    fn fly_pick(&mut self, i: usize) {
+        let Some(item) = self.fly.as_ref().and_then(|f| f.ids.get(i).cloned()) else { return };
+        let pic = match item {
+            FlyItem::Lib(id) => library::finished(&id),
+            FlyItem::File(p) => std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| crate::export::decode(&b)),
+        };
+        match pic {
+            Ok(p) => {
+                self.copy_pic(&p);
+                crate::log::line("flyout", "copied a picture");
+                self.fly_flash(i, "Copied");
+            }
+            Err(e) => self.fly_flash(i, &e),
+        }
+    }
+
+    /// Drag a picture out of the flyout (into Discord, a browser, a folder): its saved file if there is one, else a
+    /// PNG in the drag folder. The click catchers go first - they would be the drop target otherwise.
+    fn fly_drag(&mut self, i: usize) {
+        let Some((item, win)) = self.fly.as_ref().and_then(|f| f.ids.get(i).map(|id| (id.clone(), f.win))) else { return };
+        let pic = match &item {
+            FlyItem::Lib(id) => library::finished(id),
+            FlyItem::File(p) => std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| crate::export::decode(&b)),
+        };
+        let pic = match pic {
+            Ok(p) => p,
+            Err(e) => return self.fly_flash(i, &e),
+        };
+        let png = Arc::new(crate::export::encode(&pic, "png", self.cfg.on("fits_discord"), true).bytes);
+        // a game screenshot is dragged as its own file; a capture as its saved file if it has one
+        let saved = match &item {
+            FlyItem::Lib(id) => library::load_state(id).and_then(|st| st.saved.iter().rev().map(std::path::PathBuf::from).find(|p| p.exists())),
+            FlyItem::File(p) => Some(p.clone()),
+        };
+        let path = match saved {
+            Some(p) => p,
+            None => {
+                let dir = crate::paths::drag_dir();
+                clean_drag_dir(&dir);
+                let name = crate::util::name_from_pattern(self.cfg.get("name_pattern"), "Lasso");
+                let p = crate::export::free_name(&dir, &name, "png");
+                if let Err(e) = crate::export::write_new(&p, &png) {
+                    return self.fly_flash(i, &format!("Can't drag: {e}"));
+                }
+                p
+            }
+        };
+        let icon = {
+            let t = crate::export::thumbnail(&pic, 160);
+            Some((t.w, t.h, t.px))
+        };
+        if let Some(f) = self.fly.as_mut() {
+            f.dragging = true;
+            for c in f.catchers.drain(..) {
+                let _ = c.hide();
+            }
+        }
+        crate::log::line("flyout", "drag out started");
+        match crate::drag_out(win, &path, png, icon) {
+            Ok(None) => {}
+            Ok(Some(dropped)) => self.fly_drag_done(dropped),
+            Err(()) => {
+                if let Some(f) = self.fly.as_mut() {
+                    f.dragging = false;
+                }
+                self.fly_flash(i, "Can't drag here");
+            }
+        }
+    }
+
+    fn fly_drag_done(&mut self, dropped: bool) {
+        crate::log::line("flyout", if dropped { "drag out: dropped" } else { "drag out: given up" });
+        if dropped {
+            self.hide_flyout();
+        } else if let Some(f) = self.fly.as_mut() {
+            f.dragging = false;
+        }
+    }
+
     fn hide_popups(&mut self) {
         if let Some((p, _)) = self.restore_popup.take() {
             let _ = p.hide();
@@ -2219,6 +2591,9 @@ impl App {
 
     /// The drag ended: dropped = the thumbnail's job is done (it goes soon), given up = it stays as before
     pub fn thumb_drag_done(&mut self, dropped: bool) {
+        if self.fly.as_ref().is_some_and(|f| f.dragging) {
+            return self.fly_drag_done(dropped);
+        }
         crate::log::line("thumb", if dropped { "drag out: dropped" } else { "drag out: given up" });
         let Some(t) = self.thumb.as_mut() else { return };
         t.dragging = false;
@@ -2333,6 +2708,9 @@ impl App {
     }
 
     pub fn surface_closed(&mut self, win: u32) {
+        if self.fly.as_ref().is_some_and(|f| f.win == win) {
+            self.hide_flyout();
+        }
         if let Some(i) = self.pins.iter().position(|p| p.win == win) {
             self.pins.remove(i);
         }
@@ -2920,6 +3298,21 @@ fn stitch(infos: &[OutInfo], shots: Vec<(u32, Pic)>) -> Pic {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flyout_rows_fill_the_width() {
+        let (r, h) = super::flyout_rows(&[(1600, 900), (800, 600), (600, 900), (1920, 1080), (300, 300)], 356.0, 96.0, 6.0);
+        assert_eq!(r.len(), 5);
+        // every full row ends at the right edge (within rounding), no picture is wider than the room
+        for (x, _, w, _) in &r {
+            assert!(x + w <= 356.5);
+        }
+        let row0: Vec<_> = r.iter().filter(|p| p.1 == 0.0).collect();
+        let last = row0.last().unwrap();
+        assert!(last.0 + last.2 > 350.0, "first row fills the width");
+        assert!(h > 0.0);
+        assert_eq!(super::flyout_rows(&[], 356.0, 96.0, 6.0).0.len(), 0);
+    }
+
     use super::*;
 
     fn pic(w: u32, h: u32, v: u8) -> Pic {

@@ -131,7 +131,7 @@ fn apply_theme(t: &T, cfg: &Config) {
     t.set_dim(col(p.dim));
 }
 
-/// The theme cards for Settings > General > Look (Echo's / Aimdot's grid)
+/// The theme cards for Settings > Appearance > Look (Echo's / Aimdot's grid)
 fn theme_cards(c: &Config) -> ModelRc<crate::ThemeCard> {
     let cur = c.theme_id();
     let dark = crate::platform_theme_dark();
@@ -196,6 +196,13 @@ fn fill_settings(w: &LassoWindow, listening: &str) {
     w.global::<SS>().set_ui_accent(sh(c.get("ui_accent")));
     w.global::<SS>().set_ui_bg(sh(c.get("ui_bg")));
     w.global::<SS>().set_sounds(c.on("sounds"));
+    w.global::<SS>().set_steam_shots(c.on("steam_shots"));
+    w.global::<SS>().set_steam_note(sh(match crate::gamepics::steam_roots().first() {
+        Some(r) => format!("found Steam: {} - shown by game", crate::util::scrub_home(&r.to_string_lossy())),
+        None => "Steam isn't installed on this PC (or not where it usually is)".to_string(),
+    }));
+    let dirs: Vec<SharedString> = crate::gamepics::dirs(&c).iter().map(|d| sh(crate::util::scrub_home(&d.to_string_lossy()))).collect();
+    w.global::<SS>().set_game_dirs(ModelRc::new(VecModel::from(dirs)));
     w.global::<SS>().set_autostart(c.on("autostart"));
     w.global::<SS>().set_delay(c.num("delay") as i32);
     w.global::<SS>().set_pointer(c.on("pointer"));
@@ -326,6 +333,11 @@ fn share_act(w: &LassoWindow, a: &str) {
     }
 }
 
+/// where "Add a folder" starts: the home folder
+fn dirs_home() -> std::path::PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(std::path::PathBuf::from).unwrap_or_default()
+}
+
 fn set_key(k: &str, v: &str) {
     let mut c = Config::load();
     if let Some(tool) = k.strip_prefix("tool.") {
@@ -351,7 +363,7 @@ fn set_key(k: &str, v: &str) {
     tell("reload");
 }
 
-/// Settings > About > Updates (src/update.rs fills it; keep the Updater as long as the window)
+/// Settings > Updates (src/update.rs fills it; keep the Updater as long as the window)
 fn settings_updater(w: &LassoWindow) -> std::sync::Arc<crate::update::Updater> {
     let ww = w.as_weak();
     crate::update::start_window(std::sync::Arc::new(move |v: crate::update::View| {
@@ -411,6 +423,10 @@ fn setup_settings(w: &LassoWindow) {
             s => s,
         };
         w.global::<SS>().set_sec(sh(sec.to_string()));
+    }
+    // the tray's "Update to Lasso X": open at Updates, so the install is seen (26 Nov 2026)
+    if crate::update::install_asked() {
+        w.global::<SS>().set_sec(sh("updates".to_string()));
     }
     fill_settings(w, "");
     let upd = settings_updater(w);
@@ -509,6 +525,36 @@ fn setup_settings(w: &LassoWindow) {
                         });
                     }
                 });
+            }
+            "game-dir-add" => {
+                let start = dirs_home();
+                let w2 = w.as_weak();
+                std::thread::spawn(move || {
+                    if let Some(p) = crate::dialogs::pick(false, "A folder with game screenshots", "<folder>", &start) {
+                        let p = p.to_string_lossy().to_string();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let c = Config::load();
+                            let mut v: Vec<String> = crate::gamepics::dirs(&c).iter().map(|d| d.to_string_lossy().to_string()).collect();
+                            if !v.contains(&p) {
+                                v.push(p);
+                            }
+                            set_key("game_dirs", &v.join("|"));
+                            if let Some(w) = w2.upgrade() {
+                                fill_settings(&w, "");
+                            }
+                        });
+                    }
+                });
+            }
+            m if m.starts_with("game-dir-remove:") => {
+                let i: usize = m["game-dir-remove:".len()..].parse().unwrap_or(usize::MAX);
+                let c = Config::load();
+                let mut v: Vec<String> = crate::gamepics::dirs(&c).iter().map(|d| d.to_string_lossy().to_string()).collect();
+                if i < v.len() {
+                    v.remove(i);
+                    set_key("game_dirs", &v.join("|"));
+                    fill_settings(&w, "");
+                }
             }
             "open-folder" => {
                 let d = Config::load().save_dir();

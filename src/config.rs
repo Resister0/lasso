@@ -64,6 +64,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("library_group", "day"),
     // "Also show in Echo": every saved picture also goes into Echo's Screenshots folder (echo_link.rs; 22 Nov 2026)
     ("echo_shots", "0"),
+    // game screenshots in the Library (26 Nov 2026): Steam's + added folders, shown only (gamepics.rs)
+    ("steam_shots", "0"),
+    ("game_dirs", ""),
 ];
 
 #[derive(Clone, Debug, Default)]

@@ -158,6 +158,10 @@ export global SS {
     in-out property <string> ui-bg;
     in-out property <bool> autostart;
     in-out property <bool> sounds;
+    // game screenshots in the Library (26 Nov 2026): Steam's switch + where Steam is, the added folders
+    in-out property <bool> steam-shots;
+    in-out property <string> steam-note;
+    in-out property <[string]> game-dirs;
     // share links
     in-out property <string> share-email;
     // what's typed in the sign-in box (email, then the code); emptied when the code is sent
@@ -223,10 +227,10 @@ export component SettingsView inherits Rectangle {
     // Aimdot's / Echo's settings (21 Nov 2026: "I like the layout of Aimdot's menus - you scroll and it goes through the
     // sections"): one long page, a section list that follows the scroll, a search (Ctrl+F). SS.sec = the section to
     // show when the window opens.
-    property <string> active: -sv.content-y + 80px >= about-s.y ? "about" : -sv.content-y + 80px >= start-s.y ? "start" : -sv.content-y + 80px >= appearance-s.y ? "appearance" : -sv.content-y + 80px >= share-s.y ? "share" : -sv.content-y + 80px >= library-s.y ? "library" : -sv.content-y + 80px >= done-s.y ? "done" : -sv.content-y + 80px >= hotkeys-s.y ? "hotkeys" : -sv.content-y + 80px >= keys-s.y ? "keys" : "capture";
+    property <string> active: -sv.content-y + 80px >= about-s.y ? "about" : -sv.content-y + 80px >= updates-s.y ? "updates" : -sv.content-y + 80px >= start-s.y ? "start" : -sv.content-y + 80px >= appearance-s.y ? "appearance" : -sv.content-y + 80px >= share-s.y ? "share" : -sv.content-y + 80px >= library-s.y ? "library" : -sv.content-y + 80px >= done-s.y ? "done" : -sv.content-y + 80px >= hotkeys-s.y ? "hotkeys" : -sv.content-y + 80px >= keys-s.y ? "keys" : "capture";
     function go(id: string) {
         SS.sec = id;
-        sv.content-y = -min(max(0px, body.preferred-height - sv.visible-height), id == "keys" ? keys-s.y : id == "hotkeys" ? hotkeys-s.y : id == "done" ? done-s.y : id == "library" ? library-s.y : id == "share" ? share-s.y : id == "appearance" ? appearance-s.y : id == "start" ? start-s.y : id == "about" ? about-s.y : 0px);
+        sv.content-y = -min(max(0px, body.preferred-height - sv.visible-height), id == "keys" ? keys-s.y : id == "hotkeys" ? hotkeys-s.y : id == "done" ? done-s.y : id == "library" ? library-s.y : id == "share" ? share-s.y : id == "appearance" ? appearance-s.y : id == "start" ? start-s.y : id == "updates" ? updates-s.y : id == "about" ? about-s.y : 0px);
     }
     init => {
         if (SS.sec == "") {
@@ -304,13 +308,13 @@ export component SettingsView inherits Rectangle {
                     }
                     NavBtn { label: "Capture"; icon: "M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0z"; on: Find.q == "" && root.active == "capture"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("capture"); } }
                     NavBtn { label: "Editor keys"; icon: Ic.keys; on: Find.q == "" && root.active == "keys"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("keys"); } }
-                    NavBtn { label: "Global hotkeys"; icon: "M12 3v6M8 5.5a7 7 0 1 0 8 0"; on: Find.q == "" && root.active == "hotkeys"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("hotkeys"); } }
+                    NavBtn { label: "Global hotkeys"; icon: "M13 3L5 13.5h6L10 21l8-10.5h-6z"; on: Find.q == "" && root.active == "hotkeys"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("hotkeys"); } }
                     Rectangle { height: 6px; }
                     HorizontalLayout {
                         padding-left: 10px;
-                        Text { text: "OUTPUT"; font-size: 11px; font-weight: 700; letter-spacing: 0.9px; color: T.dim; height: 26px; vertical-alignment: bottom; }
+                        Text { text: "YOUR PICTURES"; font-size: 11px; font-weight: 700; letter-spacing: 0.9px; color: T.dim; height: 26px; vertical-alignment: bottom; }
                     }
-                    NavBtn { label: "Done & saving"; icon: "M12 3v12M7 10l5 5l5-5M4 21h16"; on: Find.q == "" && root.active == "done"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("done"); } }
+                    NavBtn { label: "Saving & copying"; icon: "M12 3v12M7 10l5 5l5-5M4 21h16"; on: Find.q == "" && root.active == "done"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("done"); } }
                     NavBtn { label: "Library"; icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"; on: Find.q == "" && root.active == "library"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("library"); } }
                     NavBtn { label: "Share links"; icon: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"; on: Find.q == "" && root.active == "share"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("share"); } }
                     Rectangle { height: 6px; }
@@ -320,6 +324,7 @@ export component SettingsView inherits Rectangle {
                     }
                     NavBtn { label: "Appearance"; icon: Ic.palette; on: Find.q == "" && root.active == "appearance"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("appearance"); } }
                     NavBtn { label: "Start"; icon: Ic.power; on: Find.q == "" && root.active == "start"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("start"); } }
+                    NavBtn { label: SS.upd-available ? "Updates  •  new" : "Updates"; icon: Ic.reset; on: Find.q == "" && root.active == "updates"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("updates"); } }
                     NavBtn { label: "About"; icon: Ic.info; on: Find.q == "" && root.active == "about"; faded: Find.q != ""; clicked => { Find.q = ""; root.go("about"); } }
                 Rectangle { }
             }
@@ -334,7 +339,7 @@ export component SettingsView inherits Rectangle {
                     spacing: 10px;
                     if Find.q != "": PageTitle { title: "Search"; sub: "Settings that match \"" + Find.q + "\""; }
                     capture-s := VerticalLayout {
-                        if Find.q == "" || Find.matches(Find.q, "capture timer delay pointer mouse full screenshot monitor all magnifier zoom buttons bar under the box pin save copy link done thumbnail corner editing last tool start select saved picture replace copy"): VerticalLayout {
+                        if Find.q == "" || Find.matches(Find.q, "capture timer delay pointer mouse full screenshot monitor all magnifier zoom buttons bar under the box pin save copy link done thumbnail corner editing last tool start select saved picture replace copy tools you see hide strip order toolbar"): VerticalLayout {
                             spacing: 14px;
                             padding-bottom: 40px;
                             PageTitle { title: "Capture"; sub: "Taking the picture and drawing on it."; }
@@ -401,6 +406,18 @@ Card {
                                 }
                             }
                         }
+Card {
+                            title: "Tools on the frozen screen";
+                            HorizontalLayout {
+                                Note { text: "Switch tools off to hide them (their keys still work); the arrows change the strip's order."; horizontal-stretch: 1; }
+                                Btn { small: true; text: "Default order"; clicked => { SS.act("tool-order-reset"); } }
+                            }
+                            for t[i] in SS.tool-toggles: Row {
+                                label: t.name;
+                                Btn { y: (parent.height - self.height) / 2; small: true; icon: "M6 15l6-6l6 6"; enabled: i > 0; clicked => { SS.act("tool-up:" + t.id); } }
+                                Btn { y: (parent.height - self.height) / 2; small: true; icon: "M6 9l6 6l6-6"; enabled: i < SS.tool-toggles.length - 1; clicked => { SS.act("tool-down:" + t.id); } }
+                                Switch { y: (parent.height - self.height) / 2; on: t.on; toggled(v) => { SS.set("tool." + t.id, v ? "1" : "0"); } }
+                            }
                         }
                     }
                     keys-s := VerticalLayout {
@@ -442,8 +459,8 @@ Card {
                             on: SS.hotkeys-on;
                             toggled(v) => { SS.set("hotkeys", v ? "1" : "0"); }
                             Note {
-                                text: SS.win ? "Off until you turn it on. Without hotkeys: click the tray icon."
-                                    : "Off until you turn it on. On KDE, Plasma asks once and then owns the keys: change them later in System Settings > Shortcuts > Lasso. Without hotkeys: click the tray icon, or bind \"lasso --region\" in your desktop's shortcut settings.";
+                                text: SS.win ? "Off until you turn it on. Without hotkeys: click the tray icon, then Capture area."
+                                    : "Off until you turn it on. On KDE, Plasma asks once and then owns the keys: change them later in System Settings > Shortcuts > Lasso. Without hotkeys: click the tray icon, then Capture area - or bind \"lasso --region\" in your desktop's shortcut settings.";
                             }
                             Row {
                                 label: "Want the Print key?";
@@ -454,14 +471,20 @@ Card {
                             if SS.hk-note != "": Text { text: SS.hk-note; color: T.muted; font-size: 12.5px; wrap: word-wrap; }
                             for h in SS.hotkeys: Row {
                                 label: h.name;
-                                sub: !SS.win && h.kde != "" ? "KDE uses: " + h.kde : "";
+                                // KDE (26 Nov 2026): Plasma owns the key once it's set - show the one it really uses, a click
+                                // opens KDE's shortcut settings (before, the chip showed Lasso's default next to "KDE uses: ...")
+                                sub: !SS.win && h.kde != "" ? "set in KDE - click it to change it there" : "";
                                 KeyChip {
                                     y: (parent.height - self.height) / 2;
-                                    text: h.key;
+                                    text: !SS.win && h.kde != "" ? h.kde : h.key;
                                     listening: SS.listening == "hk." + h.id;
                                     clicked => {
-                                        SS.listen("hk." + h.id);
-                                        keys-fs.focus();
+                                        if (!SS.win && h.kde != "") {
+                                            SS.act("system-keys");
+                                        } else {
+                                            SS.listen("hk." + h.id);
+                                            keys-fs.focus();
+                                        }
                                     }
                                 }
                             }
@@ -469,12 +492,12 @@ Card {
                         }
                     }
                     done-s := VerticalLayout {
-                        if Find.q == "" || Find.matches(Find.q, "enter done copy save link always copy fits discord 10 mb file too large save folder file name pattern format png jpg jpeg webp echo screenshots"): VerticalLayout {
+                        if Find.q == "" || Find.matches(Find.q, "saving copying finishing enter done copy save link always copy fits discord 10 mb file too large sounds sound camera shutter click chime save folder file name pattern format png jpg jpeg webp echo screenshots"): VerticalLayout {
                             spacing: 14px;
                             padding-bottom: 40px;
-                            PageTitle { title: "Done & saving"; sub: "What Enter does, and where pictures go."; }
+                            PageTitle { title: "Saving & copying"; sub: "What Enter does, where pictures go and what they're called."; }
                             Card {
-                            title: "When you're done";
+                            title: "Finishing a capture";
                             Row {
                                 label: "Enter (and the ✓ button) does";
                                 sub: "Copy, Save, Pin and Share link close the frozen screen; Esc keeps it for Restore";
@@ -491,9 +514,14 @@ Card {
                                 Switch { y: (parent.height - self.height) / 2; on: SS.always-copy; toggled(v) => { SS.set("always_copy", v ? "1" : "0"); } }
                             }
                             Row {
-                                label: "Fits Discord, always";
-                                sub: "pictures over 10 MB get smaller (lossless first, then JPEG) - no \"file too large\"";
+                                label: "Always fit Discord's 10 MB limit";
+                                sub: "bigger pictures get smaller (lossless first, then JPEG) - no \"file too large\"";
                                 Switch { y: (parent.height - self.height) / 2; on: SS.fits-discord; toggled(v) => { SS.set("fits_discord", v ? "1" : "0"); } }
+                            }
+                            Row {
+                                label: "Camera sound";
+                                sub: "a shutter sound when a picture is copied or saved";
+                                Switch { y: (parent.height - self.height) / 2; on: SS.sounds; toggled(v) => { SS.set("sounds", v ? "1" : "0"); } }
                             }
                         }
 Card {
@@ -545,12 +573,12 @@ Card {
                         }
                     }
                     library-s := VerticalLayout {
-                        if Find.q == "" || Find.matches(Find.q, "library keep last captures days what goes in used every nothing tools you see hide strip"): VerticalLayout {
+                        if Find.q == "" || Find.matches(Find.q, "library keep last captures days what goes in used every nothing game games steam screenshots folder folders xbox nvidia medal launcher"): VerticalLayout {
                             spacing: 14px;
                             padding-bottom: 40px;
                             PageTitle { title: "Library"; sub: "Your last captures, kept on this PC."; }
                             Card {
-                            title: "Library";
+                            title: "Keeping captures";
                             Row {
                                 label: "Keep the last";
                                 val: round(SS.keep-count) + " captures";
@@ -574,17 +602,24 @@ Card {
                             Note { text: SS.folder-note; }
                         }
 Card {
-                            title: "Tools you see";
-                            HorizontalLayout {
-                                Note { text: "Switch tools off to hide them (their keys still work); the arrows change the strip's order."; horizontal-stretch: 1; }
-                                Btn { small: true; text: "Default order"; clicked => { SS.act("tool-order-reset"); } }
+                            title: "Game screenshots";
+                            Row {
+                                label: "Steam screenshots";
+                                sub: SS.steam-note;
+                                Switch { y: (parent.height - self.height) / 2; on: SS.steam-shots; toggled(v) => { SS.set("steam_shots", v ? "1" : "0"); } }
                             }
-                            for t[i] in SS.tool-toggles: Row {
-                                label: t.name;
-                                Btn { y: (parent.height - self.height) / 2; small: true; icon: "M6 15l6-6l6 6"; enabled: i > 0; clicked => { SS.act("tool-up:" + t.id); } }
-                                Btn { y: (parent.height - self.height) / 2; small: true; icon: "M6 9l6 6l6-6"; enabled: i < SS.tool-toggles.length - 1; clicked => { SS.act("tool-down:" + t.id); } }
-                                Switch { y: (parent.height - self.height) / 2; on: t.on; toggled(v) => { SS.set("tool." + t.id, v ? "1" : "0"); } }
+                            for d[i] in SS.game-dirs: Row {
+                                label: "Added folder";
+                                sub: d;
+                                Btn { y: (parent.height - self.height) / 2; small: true; text: "Remove"; clicked => { SS.act("game-dir-remove:" + i); } }
                             }
+                            Row {
+                                label: "Other launchers";
+                                sub: "Xbox Game Bar, NVIDIA, Medal... - add the folder they save screenshots in";
+                                Btn { y: (parent.height - self.height) / 2; small: true; text: "Add a folder"; clicked => { SS.act("game-dir-add"); } }
+                            }
+                            Note { text: "They show up in the Library (by game) and the tray's latest pictures. Lasso only shows them - nothing is copied or moved."; }
+                        }
                         }
                         }
                     }
@@ -594,7 +629,7 @@ Card {
                             padding-bottom: 40px;
                             PageTitle { title: "Share links"; sub: "sonela.app/s/... links for your screenshots."; }
                             Card {
-                            title: "Share links";
+                            title: "Your links";
                             has-switch: true;
                             on: SS.share-on;
                             toggled(v) => { SS.set("share_on", v ? "1" : "0"); }
@@ -712,51 +747,25 @@ Card {
                         }
                     }
                     start-s := VerticalLayout {
-                        if Find.q == "" || Find.matches(Find.q, "start with my pc computer login autostart boot sounds sound click chime tray"): VerticalLayout {
+                        if Find.q == "" || Find.matches(Find.q, "start with my pc computer login autostart boot tray"): VerticalLayout {
                             spacing: 14px;
                             padding-bottom: 40px;
-                            PageTitle { title: "Start"; sub: "What happens when you log in."; }
+                            PageTitle { title: "Start"; sub: "What happens when you turn on your PC."; }
                             Card {
-                            title: "Start";
                             Row {
                                 label: "Start Lasso with your PC";
                                 sub: "it waits in the tray (small, nothing runs until you capture)";
                                 Switch { y: (parent.height - self.height) / 2; on: SS.autostart; toggled(v) => { SS.set("autostart", v ? "1" : "0"); } }
                             }
-                            Row {
-                                label: "Sounds";
-                                sub: "a camera shutter when a picture is copied / saved";
-                                Switch { y: (parent.height - self.height) / 2; on: SS.sounds; toggled(v) => { SS.set("sounds", v ? "1" : "0"); } }
-                            }
                         }
                         }
                     }
-                    about-s := VerticalLayout {
-                        if Find.q == "" || Find.matches(Find.q, "about version help updates update channel beta dev stable privacy count daily numbers tray quit log"): VerticalLayout {
+                    updates-s := VerticalLayout {
+                        if Find.q == "" || Find.matches(Find.q, "updates update new version check channel beta dev stable upgrade"): VerticalLayout {
                             spacing: 14px;
                             padding-bottom: 40px;
-                            PageTitle { title: "About"; sub: "Help, updates and privacy."; }
-                            HorizontalLayout {
-                            spacing: 14px;
-                            LogoMark { width: 56px; height: 56px; }
-                            VerticalLayout {
-                                alignment: center;
-                                Text { text: "Sonela Lasso"; font-size: 22px; font-weight: 700; color: T.text; }
-                                Text { text: "Version " + SS.version + " · sonela.app/lasso"; font-size: 13px; color: T.muted; }
-                            }
-                        }
-Card {
-                            title: "Help";
-                            Note { text: "Take a screenshot: click the tray icon (or your hotkey), drag a box, draw, then Enter. Esc closes at once - the tray menu's \"Restore last capture\" brings it back. Press ? on the frozen screen for every key."; }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
-                                Btn { small: true; text: "Open the log folder"; clicked => { SS.act("open-log"); } }
-                                Btn { small: true; text: "Capture now"; primary: true; clicked => { SS.act("capture"); } }
-                            }
-                        }
-Card {
-                            title: "Updates";
+                            PageTitle { title: "Updates"; sub: "You have Lasso " + SS.version + ". It keeps itself up to date."; }
+                            Card {
                             Row {
                                 label: SS.upd-available ? "Lasso " + SS.upd-version + " is out" : "Lasso updates";
                                 sub: SS.upd-status;
@@ -833,6 +842,38 @@ Card {
                             if SS.upd-can-check: Note { text: "Going back to Stable: you keep the version you have until Stable gets a newer one."; }
                             Note { text: "Lasso checks sonela.app every few hours. The check sends only Lasso's version and your system type (Windows or Linux) - no ID, nothing about you."; }
                         }
+                        }
+                    }
+                    about-s := VerticalLayout {
+                        if Find.q == "" || Find.matches(Find.q, "about version help privacy count daily numbers tray quit log"): VerticalLayout {
+                            spacing: 14px;
+                            padding-bottom: 40px;
+                            PageTitle { title: "About"; sub: "Help and privacy."; }
+                            HorizontalLayout {
+                            spacing: 14px;
+                            LogoMark { width: 56px; height: 56px; }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Sonela Lasso"; font-size: 22px; font-weight: 700; color: T.text; }
+                                Text { text: "Version " + SS.version + " · sonela.app/lasso"; font-size: 13px; color: T.muted; }
+                                Text {
+                                    text: SS.upd-available ? "Lasso " + SS.upd-version + " is out - see Updates" : "Updates";
+                                    font-size: 13px;
+                                    color: T.accent;
+                                    TouchArea { mouse-cursor: pointer; clicked => { Find.q = ""; root.go("updates"); } }
+                                }
+                            }
+                        }
+Card {
+                            title: "Help";
+                            Note { text: "Take a screenshot: click the tray icon and Capture area (or press your hotkey), drag a box, draw, then Enter. The tray icon also shows your latest captures: click one to copy it. Esc closes at once - the tray menu's \"Restore last capture\" brings it back. Press ? on the frozen screen for every key."; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Btn { small: true; text: "Open the log folder"; clicked => { SS.act("open-log"); } }
+                                Btn { small: true; text: "Capture now"; primary: true; clicked => { SS.act("capture"); } }
+                            }
+                        }
 Card {
                             title: "Privacy";
                             Row {
@@ -843,7 +884,7 @@ Card {
                         }
                         }
                     }
-                    if Find.q != "" && !Find.matches(Find.q, "capture timer delay pointer mouse full screenshot monitor all magnifier zoom buttons bar under the box pin save copy link done thumbnail corner editing last tool start select saved picture replace copy keys keyboard shortcut shortcuts editor frozen screen reset default change tool undo redo copy save global hotkeys hotkey keys print screen capture area full window repeat restore delete last kde shortcuts enter done copy save link always copy fits discord 10 mb file too large save folder file name pattern format png jpg jpeg webp echo screenshots library keep last captures days what goes in used every nothing tools you see hide strip share link links sonela account sign in email echo cloud private info view once expire expiry copy picture appearance theme themes look colour color dark light teal violet coral ocean seasonal custom match system accent background start with my pc computer login autostart boot sounds sound click chime tray about version help updates update channel beta dev stable privacy count daily numbers tray quit log"): Note { text: "Nothing found. Try another word, like \"theme\", \"hotkey\" or \"folder\"."; }
+                    if Find.q != "" && !Find.matches(Find.q, "capture timer delay pointer mouse full screenshot monitor all magnifier zoom buttons bar under the box pin save copy link done thumbnail corner editing last tool start select saved picture replace copy keys keyboard shortcut shortcuts editor frozen screen reset default change tool undo redo copy save global hotkeys hotkey keys print screen capture area full window repeat restore delete last kde shortcuts enter done copy save link always copy fits discord 10 mb file too large save folder file name pattern format png jpg jpeg webp echo screenshots library keep last captures days what goes in used every nothing game games steam folder folders xbox nvidia medal launcher tools you see hide strip share link links sonela account sign in email echo cloud private info view once expire expiry copy picture appearance theme themes look colour color dark light teal violet coral ocean seasonal custom match system accent background start with my pc computer login autostart boot sounds sound camera shutter click chime tray about version help updates update new check upgrade channel beta dev stable privacy count daily numbers tray quit log"): Note { text: "Nothing found. Try another word, like \"theme\", \"hotkey\" or \"folder\"."; }
                     // room so the last section can scroll to the top
                     Rectangle { height: max(0px, sv.visible-height - about-s.preferred-height - 40px); }
                 }

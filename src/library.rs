@@ -296,6 +296,29 @@ pub fn load(id: &str) -> Result<(Pic, State, HashMap<String, Arc<Pic>>), String>
     Ok((base, st, imgs))
 }
 
+/// The newest `n` captures that have a thumbnail, newest first (the tray flyout). Only those folders are read - folder
+/// names start with the date and time, so no full pass over the Library is needed.
+pub fn recent(n: usize) -> Vec<Item> {
+    let Ok(rd) = std::fs::read_dir(crate::paths::library_dir()) else { return vec![] };
+    let mut names: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    let mut out = vec![];
+    for id in names {
+        if out.len() >= n {
+            break;
+        }
+        let d = dir(&id);
+        let thumb = d.join("thumb.png");
+        if !thumb.is_file() {
+            continue;
+        }
+        let Some(st) = load_state(&id) else { continue };
+        out.push(Item { id, path: d.join("screen.png"), thumb, created: st.created, shared: !st.link.is_empty(), editable: true, app: st.app, text: st.text });
+    }
+    out.sort_by(|a, b| b.created.cmp(&a.created));
+    out
+}
+
 /// Newest first: library captures + pictures in the save folder that aren't from a capture.
 pub fn list(save_dir: &Path) -> Vec<Item> {
     let mut out = vec![];
@@ -330,6 +353,13 @@ pub fn list(save_dir: &Path) -> Vec<Item> {
             }
             let created = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
             out.push(Item { id: String::new(), thumb: p.clone(), path: p, created, shared: false, editable: false, app: String::new(), text: String::new() });
+        }
+    }
+    // game screenshots (Settings > Library > Game screenshots): shown, never copied
+    let have: std::collections::HashSet<PathBuf> = out.iter().filter(|i| i.id.is_empty()).map(|i| i.path.clone()).collect();
+    for f in crate::gamepics::all(&crate::config::Config::load()) {
+        if !have.contains(&f.path) && !saved.contains(&f.path) {
+            out.push(Item { id: String::new(), path: f.path, thumb: f.thumb, created: f.created, shared: false, editable: false, app: f.app, text: String::new() });
         }
     }
     out.sort_by(|a, b| b.created.cmp(&a.created));

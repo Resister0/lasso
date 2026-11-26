@@ -15,6 +15,7 @@ mod dialogs;
 mod echo_link;
 mod editor;
 mod export;
+mod gamepics;
 mod ipc;
 mod keys;
 mod library;
@@ -359,6 +360,8 @@ fn handle(cmd: &str) {
     log::line("cmd", cmd.split(':').next().unwrap_or(""));
     let (c, arg) = cmd.split_once(':').unwrap_or((cmd, ""));
     with_app(|a| match c {
+        // left-click on the tray icon (26 Nov 2026): the flyout with the latest captures
+        "flyout" => a.toggle_flyout(),
         "region" => a.capture(Mode::Area, true),
         "window" => a.capture(Mode::Window, true),
         "screen" => a.capture(Mode::Screen, true),
@@ -386,7 +389,7 @@ fn handle(cmd: &str) {
         "share-file" => a.share_file(arg),
         "copy-files" => clipboard::set_files(&arg.split('|').filter(|s| !s.is_empty()).collect::<Vec<_>>()),
         "reload" => a.reload_config(),
-        // the tray's "Update to Lasso X": Settings > About installs it
+        // the tray's "Update to Lasso X": Settings > Updates installs it
         "update" => update::open_settings_and_install(|| a.open_window_page("--settings-window", 5)),
         // the Settings window checked: show / drop the tray item now
         "update-known" => set_tray_update(update::tray_label()),
@@ -647,7 +650,7 @@ fn daemon(first: Option<String>) {
 
 fn usage() {
     println!(
-        "Sonela Lasso {}\n\nlasso              start (tray icon)\nlasso --region     capture an area\nlasso --window     capture a window\nlasso --screen     capture a whole screen, with every tool\nlasso --full       full screenshot, no editing (copied + saved)\nlasso --repeat     the last box again\nlasso --restore    bring back the last capture\nlasso --library    the library\nlasso --settings   settings\nlasso --open FILE  mark up a picture\nlasso --quit       quit the running Lasso",
+        "Sonela Lasso {}\n\nlasso              start (tray icon)\nlasso --region     capture an area\nlasso --window     capture a window\nlasso --screen     capture a whole screen, with every tool\nlasso --full       full screenshot, no editing (copied + saved)\nlasso --repeat     the last box again\nlasso --restore    bring back the last capture\nlasso --library    the library\nlasso --cmd flyout the tray flyout (latest captures)\nlasso --settings   settings\nlasso --open FILE  mark up a picture\nlasso --quit       quit the running Lasso",
         env!("CARGO_PKG_VERSION")
     );
 }
