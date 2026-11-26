@@ -65,7 +65,6 @@ pub fn local_from_unix(t: i64) -> (i32, u32, u32, u32, u32, u32) {
 }
 
 /// UTC seconds -> civil date/time
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn civil(t: i64) -> (i32, u32, u32, u32, u32, u32) {
     let days = t.div_euclid(86400);
     let secs = t.rem_euclid(86400);
