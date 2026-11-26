@@ -92,7 +92,10 @@ pub fn store(id: &str, base: &Pic, base_dirty: bool, st: &State, images: &HashMa
         let _ = std::fs::write(d.join(THUMB_MARK), b"");
     }
     let json = serde_json::to_string_pretty(&st).map_err(|e| e.to_string())?;
-    crate::export::write_new(&d.join("state.json"), json.as_bytes())
+    crate::export::write_new(&d.join("state.json"), json.as_bytes())?;
+    // Echo Cloud backup (when it's on): look again soon
+    crate::share::backup::kick();
+    Ok(())
 }
 
 // --- one store worker: writes of all captures in order, never two at once; a cancelled capture is never written again

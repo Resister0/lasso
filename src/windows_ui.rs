@@ -5,7 +5,7 @@ use crate::app::OutInfo;
 use crate::config::Config;
 use crate::keys;
 use crate::library;
-use crate::{HkRow, KeyBind, LassoWindow, LibGroup, LibItem, ToolToggle, LL, SS, T};
+use crate::{FormField, HkRow, KeyBind, LassoWindow, LibGroup, LibItem, PlaceRow, ToolToggle, LL, SS, T};
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
@@ -203,6 +203,17 @@ fn fill_settings(w: &LassoWindow, listening: &str) {
     }));
     let dirs: Vec<SharedString> = crate::gamepics::dirs(&c).iter().map(|d| sh(crate::util::scrub_home(&d.to_string_lossy()))).collect();
     w.global::<SS>().set_game_dirs(ModelRc::new(VecModel::from(dirs)));
+    w.global::<SS>().set_backup_captures(c.on("backup_captures"));
+    w.global::<SS>().set_backup_games(c.on("backup_games"));
+    // the worker's line only while a switch is on (an old "Paused: ..." means nothing once it's off)
+    let bon = c.on("backup_captures") || c.on("backup_games");
+    let bst = crate::share::backup::status();
+    w.global::<SS>().set_backup_status(sh(if !bon { String::new() } else if bst.is_empty() { "Starts in a moment...".to_string() } else { bst }));
+    w.global::<SS>().set_backup_count(crate::share::backup::count() as i32);
+    w.global::<SS>().set_backup_ec(c.on("backup_ec"));
+    fill_places(w, &c);
+    let kinds: Vec<ToolToggle> = crate::clouds::KINDS.iter().map(|(id, n)| ToolToggle { id: sh(id.to_string()), name: sh(n.to_string()), on: false }).collect();
+    w.global::<SS>().set_place_kinds(ModelRc::new(VecModel::from(kinds)));
     w.global::<SS>().set_autostart(c.on("autostart"));
     w.global::<SS>().set_delay(c.num("delay") as i32);
     w.global::<SS>().set_pointer(c.on("pointer"));
@@ -276,7 +287,7 @@ fn fill_settings(w: &LassoWindow, listening: &str) {
         .map(|t| ToolToggle { id: sh(t.id()), name: sh(t.name()), on: !hidden.contains(&t.id()) })
         .collect();
     w.global::<SS>().set_tool_toggles(ModelRc::new(VecModel::from(tt)));
-    w.global::<SS>().set_folder_note(sh(format!("Captures are kept in {} (never uploaded).", crate::util::scrub_home(&crate::paths::library_dir().to_string_lossy()))));
+    w.global::<SS>().set_folder_note(sh(format!("Captures are kept in {} - only uploaded when you share one or switch on the backup below.", crate::util::scrub_home(&crate::paths::library_dir().to_string_lossy()))));
 }
 
 thread_local! {
@@ -429,6 +440,7 @@ fn setup_settings(w: &LassoWindow) {
         w.global::<SS>().set_sec(sh("updates".to_string()));
     }
     fill_settings(w, "");
+    backup_watch(w);
     let upd = settings_updater(w);
     let ww = w.as_weak();
     w.global::<SS>().on_set(move |k, v| {
@@ -555,6 +567,70 @@ fn setup_settings(w: &LassoWindow) {
                     set_key("game_dirs", &v.join("|"));
                     fill_settings(&w, "");
                 }
+            }
+            m if m.starts_with("place-add:") => place_form(&w, &m["place-add:".len()..]),
+            "place-cancel" => {
+                w.global::<SS>().set_place_adding(SharedString::new());
+                w.global::<SS>().set_place_msg(SharedString::new());
+            }
+            "place-connect" => {
+                let ss = w.global::<SS>();
+                let kind = ss.get_place_adding().to_string();
+                let vals = [ss.get_pf0(), ss.get_pf1(), ss.get_pf2(), ss.get_pf3(), ss.get_pf4()];
+                let keys = crate::clouds::fields(&kind);
+                let vals: Vec<(String, String)> = keys.iter().zip(vals.iter()).map(|(f, v)| (f.0.to_string(), v.to_string())).collect();
+                place_connect(&w, kind, vals);
+            }
+            m if m.starts_with("place-on:") => {
+                let mut it = m["place-on:".len()..].split(':');
+                if let (Some(Ok(id)), Some(v)) = (it.next().map(|x| x.parse::<u32>()), it.next()) {
+                    let _ = crate::clouds::Rc::list_only().set_on(id, v == "1");
+                    tell("reload");
+                    fill_settings(&w, "");
+                }
+            }
+            m if m.starts_with("place-remove:") => {
+                if let Ok(id) = m["place-remove:".len()..].parse::<u32>() {
+                    let w2 = w.as_weak();
+                    std::thread::spawn(move || {
+                        // its login goes too (rclone is there: it was used to add the place)
+                        let r = match crate::clouds::Rc::app() {
+                            Ok(rc) => rc.remove(id),
+                            Err(_) => crate::clouds::Rc::list_only().remove_from_list(id),
+                        };
+                        crate::share::backup::forget_place(id);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(w) = w2.upgrade() {
+                                w.global::<SS>().set_place_msg(sh(match r {
+                                    Ok(()) => "Removed. The pictures already there stay.".to_string(),
+                                    Err(e) => format!("Couldn't remove it: {e}"),
+                                }));
+                                tell("reload");
+                                fill_settings(&w, "");
+                            }
+                        });
+                    });
+                }
+            }
+            "backup-delete" => {
+                // Echo Cloud off first: the always-running Lasso's next round must not upload it all again
+                set_key("backup_ec", "0");
+                fill_settings(&w, "");
+                w.global::<SS>().set_backup_status(sh("Deleting the backup from Echo Cloud...".to_string()));
+                let w2 = w.as_weak();
+                std::thread::spawn(move || {
+                    let r = crate::share::backup::delete_all(&Config::load());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = w2.upgrade() {
+                            fill_settings(&w, "");
+                            let msg = match r {
+                                Ok(n) => format!("Deleted {n} pictures from Echo Cloud"),
+                                Err(e) => format!("Couldn't delete the backup: {e}"),
+                            };
+                            w.global::<SS>().set_backup_status(sh(msg));
+                        }
+                    });
+                });
             }
             "open-folder" => {
                 let d = Config::load().save_dir();
@@ -892,6 +968,132 @@ fn delete_item(key: &str, is_lib: bool) -> Result<usize, String> {
     // the running Lasso: no late write brings it back, no Restore of it (review D4)
     tell(&format!("forget:{key}"));
     Ok(n.max(1))
+}
+
+/// The own backup places with what each one is doing ("Google Drive" / "you@... · 120 pictures backed up · last 14:02")
+fn fill_places(w: &LassoWindow, c: &Config) {
+    let on = c.on("backup_captures") || c.on("backup_games");
+    let rows: Vec<PlaceRow> = crate::clouds::Rc::list_only()
+        .places()
+        .iter()
+        .map(|p| {
+            let st = crate::share::backup::place_status(p.id);
+            let n = crate::share::backup::place_count(p.id);
+            let what = if !p.on {
+                "off".to_string()
+            } else if on && !st.is_empty() {
+                st
+            } else if n > 0 {
+                format!("{} there", crate::share::backup::pics(n))
+            } else if on {
+                "starts in a moment...".to_string()
+            } else {
+                "ready - switch on what to back up above".to_string()
+            };
+            PlaceRow { id: p.id as i32, name: sh(crate::clouds::kind_name(&p.kind).to_string()), sub: sh(format!("{} · {what}", crate::util::scrub_home(&p.label))), on: p.on }
+        })
+        .collect();
+    w.global::<SS>().set_places(ModelRc::new(VecModel::from(rows)));
+}
+
+/// "Add a place": the form for that kind (or, for a folder, the folder picker right away)
+fn place_form(w: &LassoWindow, kind: &str) {
+    let ss = w.global::<SS>();
+    if kind == "folder" {
+        let start = dirs_home();
+        let w2 = w.as_weak();
+        std::thread::spawn(move || {
+            if let Some(p) = crate::dialogs::pick(false, "A folder for the backup (a NAS, or your cloud's folder on this PC)", "<folder>", &start) {
+                let p = p.to_string_lossy().to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = w2.upgrade() {
+                        place_connect(&w, "folder".into(), vec![("path".into(), p)]);
+                    }
+                });
+            }
+        });
+        return;
+    }
+    let f: Vec<FormField> = crate::clouds::fields(kind).iter().map(|(_, l, h, sec)| FormField { label: sh(l.to_string()), hint: sh(h.to_string()), secret: *sec }).collect();
+    ss.set_place_browser(f.is_empty());
+    ss.set_place_fields(ModelRc::new(VecModel::from(f)));
+    for set in [SS::set_pf0, SS::set_pf1, SS::set_pf2, SS::set_pf3, SS::set_pf4] {
+        set(&ss, SharedString::new());
+    }
+    ss.set_place_msg(SharedString::new());
+    ss.set_place_adding_name(sh(crate::clouds::kind_name(kind).to_string()));
+    ss.set_place_adding(sh(kind.to_string()));
+}
+
+/// Connect in a worker thread (rclone may be downloaded first, a browser sign-in waits for the user)
+fn place_connect(w: &LassoWindow, kind: String, vals: Vec<(String, String)>) {
+    let ss = w.global::<SS>();
+    if ss.get_place_busy() {
+        return;
+    }
+    ss.set_place_busy(true);
+    let first = !crate::clouds::rclone_ready();
+    ss.set_place_msg(sh(match (first, kind.as_str()) {
+        (true, _) => "Getting rclone first (the cloud tool Lasso uses, about 25 MB, only once)...".to_string(),
+        (_, "gdrive" | "pcloud") => "Sign in in your browser - Lasso waits here...".to_string(),
+        _ => "Connecting...".to_string(),
+    }));
+    let w2 = w.as_weak();
+    std::thread::spawn(move || {
+        let r = crate::clouds::Rc::app().and_then(|rc| {
+            if first && matches!(kind.as_str(), "gdrive" | "pcloud") {
+                let w3 = w2.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = w3.upgrade() {
+                        w.global::<SS>().set_place_msg(sh("Sign in in your browser - Lasso waits here...".to_string()));
+                    }
+                });
+            }
+            rc.connect(&kind, &vals)
+        });
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(w) = w2.upgrade() else { return };
+            let ss = w.global::<SS>();
+            ss.set_place_busy(false);
+            match r {
+                Ok(p) => {
+                    ss.set_place_adding(SharedString::new());
+                    ss.set_place_msg(sh(format!("Added {} - the backup goes there from now on.", crate::clouds::kind_name(&p.kind))));
+                    tell("reload");
+                }
+                Err(e) => ss.set_place_msg(sh(format!("Couldn't add it: {e}"))),
+            }
+            fill_settings(&w, "");
+        });
+    });
+}
+
+thread_local! {
+    static BACKUP_WATCH: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+}
+
+/// Settings: the backup's status line follows the worker (it runs in the always-running Lasso) every 3 seconds
+fn backup_watch(w: &LassoWindow) {
+    let ww = w.as_weak();
+    let t = slint::Timer::default();
+    t.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(3), move || {
+        let Some(w) = ww.upgrade() else { return };
+        let ss = w.global::<SS>();
+        // off: nothing runs (and "Deleted N pictures" stays put)
+        if !ss.get_backup_captures() && !ss.get_backup_games() {
+            return;
+        }
+        let st = crate::share::backup::status();
+        if !st.is_empty() {
+            ss.set_backup_status(sh(st));
+        }
+        ss.set_backup_count(crate::share::backup::count() as i32);
+        // the own places' lines (not while the form is open: rebuilding the model would be harmless, but keep it calm)
+        if !ss.get_place_busy() {
+            fill_places(&w, &Config::load());
+        }
+    });
+    BACKUP_WATCH.with(|x| *x.borrow_mut() = Some(t));
 }
 
 thread_local! {

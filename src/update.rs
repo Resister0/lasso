@@ -243,7 +243,7 @@ pub fn tray_label() -> Option<String> {
 
 /// GET -> (status, body). reqwest blocking + rustls/ring like ping.rs (rustls without a default crypto provider: ring
 /// is installed once). Redirects are followed (GitHub downloads redirect).
-fn http_get(url: &str) -> Result<(u16, Vec<u8>), String> {
+pub(crate) fn http_get(url: &str) -> Result<(u16, Vec<u8>), String> {
     http_t(url, &[], None, 300)
 }
 

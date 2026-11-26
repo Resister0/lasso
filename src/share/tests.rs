@@ -16,6 +16,10 @@ use std::sync::{Arc, Mutex};
 struct Server {
     /// /health says lasso: 1
     ready: bool,
+    /// ... lasso: 2 (takes backups)
+    backups: bool,
+    /// the "kind" of every /upload
+    kinds: Vec<String>,
     /// every request: "METHOD /path"
     log: Vec<String>,
     /// R2: key -> bytes
@@ -82,7 +86,7 @@ fn handle(st: &Mutex<Server>, base: &str, m: &str, path: &str, auth: &str, body:
     let authed = auth.strip_prefix("Bearer ").is_some_and(|t| s.tokens.iter().any(|x| x == t));
     let need = |ok: bool, v: Value| if ok { (200, v.to_string()) } else { (401, json!({"error": "Signed out - sign in to Echo Cloud again"}).to_string()) };
     match (m, path) {
-        ("GET", "/health") => (200, if s.ready { json!({"service": "echo-cloud", "ok": true, "lasso": 1}) } else { json!({"service": "echo-cloud", "ok": true}) }.to_string()),
+        ("GET", "/health") => (200, if s.backups { json!({"service": "echo-cloud", "ok": true, "lasso": 2}) } else if s.ready { json!({"service": "echo-cloud", "ok": true, "lasso": 1}) } else { json!({"service": "echo-cloud", "ok": true}) }.to_string()),
         ("POST", "/auth/start") => (200, json!({"ok": true}).to_string()),
         ("POST", "/auth/verify") => {
             if j["code"] == "123456" {
@@ -106,6 +110,7 @@ fn handle(st: &Mutex<Server>, base: &str, m: &str, path: &str, auth: &str, body:
         }
         ("POST", "/upload") => {
             let key = j["path"].as_str().unwrap_or("").to_string();
+            s.kinds.push(j["kind"].as_str().unwrap_or("").to_string());
             need(authed, json!({"url": format!("{base}/r2/{key}?X-Amz-Signature=x"), "size": j["size"], "share_only": j["share_only"]}))
         }
         ("PUT", p) if p.starts_with("/r2/") => {
@@ -135,6 +140,16 @@ fn handle(st: &Mutex<Server>, base: &str, m: &str, path: &str, auth: &str, body:
                 return (200, json!({"url": format!("https://sonela.app/s/{id}"), "id": id, "expires": expires, "viewed": true}).to_string());
             }
             (200, json!({"url": format!("https://sonela.app/s/{id}"), "expires": expires}).to_string())
+        }
+        ("POST", "/delete") => {
+            if !authed {
+                return need(false, Value::Null);
+            }
+            let paths: Vec<String> = j["paths"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            for p in &paths {
+                s.objects.remove(p);
+            }
+            (200, json!({"ok": true, "deleted": paths.len()}).to_string())
         }
         ("POST", "/share/remove") => {
             if !authed {
@@ -369,4 +384,25 @@ fn file_key_is_stable_and_private() {
     // the name made for the server from it has no part of the path either
     let k = api::key_for(&a, "png", 2026, 11);
     assert!(!k.contains("pics") && !k.contains("Lasso 2026"), "{k}");
+}
+/// Echo Cloud backup (26 Nov 2026): a server that only does links (lasso: 1) gets no backup upload; one with lasso: 2
+/// gets kind "backup", the picture lands under Lasso/Backup/, and /delete takes it away again
+#[test]
+fn backup_needs_the_new_server_and_round_trips() {
+    let m = mock(true);
+    m.st.lock().unwrap().tokens.push(TOKEN.into());
+    let api = api::Api { base: m.base.clone(), token: TOKEN.into(), http: &net::Net };
+    assert_eq!(api.backup_ready().unwrap_err(), Fail::NotReady);
+    m.st.lock().unwrap().backups = true;
+    api.backup_ready().unwrap();
+    let path = "Lasso/Backup/Captures/2026/11/20261126-031500.png".to_string();
+    let url = api.backup_url(&path, 3).unwrap();
+    api.put(&url, b"png".to_vec()).unwrap();
+    {
+        let s = m.st.lock().unwrap();
+        assert_eq!(s.kinds, vec!["backup"]);
+        assert_eq!(s.objects.get(&path).map(|b| b.as_slice()), Some(&b"png"[..]));
+    }
+    api.delete(std::slice::from_ref(&path)).unwrap();
+    assert!(m.st.lock().unwrap().objects.is_empty());
 }

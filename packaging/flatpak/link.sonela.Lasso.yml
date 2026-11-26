@@ -20,7 +20,7 @@ command: lasso
 
 finish-args:
   - --share=ipc
-  - --share=network                       # share links (later)
+  - --share=network                       # share links, the backup
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
@@ -42,6 +42,20 @@ cleanup:
   - /share/man
 
 modules:
+  # ---- rclone (the backup to your own clouds, src/clouds.rs) - upstream release binary, the same as Echo's ----
+  - name: rclone
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 rclone /app/bin/rclone
+    sources:
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/rclone/rclone/releases/download/v1.75.2/rclone-v1.75.2-linux-amd64.zip
+        sha256: 349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/rclone/rclone/releases/download/v1.75.2/rclone-v1.75.2-linux-arm64.zip
+        sha256: 7e1e8d69654941b7b7df84ee74c5f7fb09cce7d5496947fb7bf16b55ff427d10
   - name: lasso
     buildsystem: simple
     build-commands:

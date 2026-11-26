@@ -398,6 +398,7 @@ impl App {
 
     pub fn reload_config(&mut self) {
         self.cfg = Config::load();
+        crate::share::backup::kick();
         self.keymap = self.cfg.keymap();
         self.rebuild_tools();
         let dark = self.cfg.dark();

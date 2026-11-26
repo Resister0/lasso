@@ -67,6 +67,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // game screenshots in the Library (26 Nov 2026): Steam's + added folders, shown only (gamepics.rs)
     ("steam_shots", "0"),
     ("game_dirs", ""),
+    ("backup_captures", "0"),
+    ("backup_games", "0"),
+    ("backup_ec", "0"),
 ];
 
 #[derive(Clone, Debug, Default)]

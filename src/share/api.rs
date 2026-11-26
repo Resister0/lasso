@@ -65,6 +65,8 @@ pub struct Api<'a> {
 
 /// Lasso's server version this client speaks (the server's /health says `"lasso": N`, N >= this)
 pub const PROTOCOL: u64 = 1;
+/// ... and what Echo Cloud backup needs (kind "backup", 26 Nov 2026)
+pub const BACKUP_PROTOCOL: u64 = 2;
 /// Pictures over this are refused by the server (export's "Fits Discord" keeps them at 10 MB anyway)
 pub const MAX_BYTES: usize = 25 * 1000 * 1000;
 
@@ -94,6 +96,31 @@ impl Api<'_> {
         } else {
             Err(Fail::NotReady)
         }
+    }
+
+    /// Does the server take Lasso backups? (`"lasso": 2` or more)
+    pub fn backup_ready(&self) -> Result<(), Fail> {
+        let r = self.http.call("GET", &format!("{}/health", self.base), &[], None, 15).map_err(Fail::Offline)?;
+        let v: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
+        if r.code == 200 && v["lasso"].as_u64().unwrap_or(0) >= BACKUP_PROTOCOL {
+            Ok(())
+        } else {
+            Err(Fail::NotReady)
+        }
+    }
+
+    /// A presigned upload link for a backup picture (a normal Echo Cloud file under Lasso/Backup/, kept without a link)
+    pub fn backup_url(&self, path: &str, size: usize) -> Result<String, Fail> {
+        let v = self.call("POST", "/upload", Some(json!({ "path": path, "size": size, "kind": "backup" })))?;
+        match v["url"].as_str() {
+            Some(u) if u.starts_with("https://") || u.starts_with("http://127.0.0.1") => Ok(u.to_string()),
+            _ => Err(Fail::Msg("The Sonela server gave no upload link".into())),
+        }
+    }
+
+    /// Delete these files from Echo Cloud (paths in the account, max. 1000 per call)
+    pub fn delete(&self, paths: &[String]) -> Result<(), Fail> {
+        self.call("POST", "/delete", Some(json!({ "paths": paths }))).map(|_| ())
     }
 
     /// Sign-in step 1: the server emails a 6-digit code (Echo Cloud's sign-in, same account)

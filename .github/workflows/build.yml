@@ -27,6 +27,9 @@ env:
   # Tauri's CLI pinned to one exact version (the NSIS packer + the update signer): an unpinned "@2" would run whatever
   # was published last, next to the signing key
   TAURI_CLI: "@tauri-apps/cli@2.12.4"
+  # Google Drive in the backup signs in with Echo's Google login; its secret comes from this repo secret (build.rs).
+  # Missing = the build still works, with rclone's own Google login.
+  LASSO_GDRIVE_SECRET: ${{ secrets.LASSO_GDRIVE_SECRET }}
 jobs:
   windows:
     if: github.repository == 'Resister0/lasso'

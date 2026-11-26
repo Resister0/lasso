@@ -85,16 +85,26 @@ export component Thumb inherits Window {
             VerticalLayout {
                 padding: 8px;
                 spacing: 6px;
-                Rectangle {
-                    border-radius: 8px;
-                    clip: true;
-                    background: #000;
+                // 26 Nov 2026 (the user: "don't like this black border and the big black Copied bar, makes it look like
+                // the black is part of the screenshot"): the picture box is the picture's own shape, centred; what's
+                // left around it is the popup's colour, and the note is its own line below - nothing dark on or around it
+                box := Rectangle {
                     vertical-stretch: 1;
+                    property <float> ar: root.pic.width / max(1, root.pic.height);
+                    property <length> pw: min(self.width, self.height * ar);
+                    property <length> ph: min(self.height, self.width / ar);
+                    Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: box.pw;
+                    height: box.ph;
+                    border-radius: 6px;
+                    clip: true;
                     Image {
                         width: parent.width;
                         height: parent.height;
                         source: root.pic;
-                        image-fit: contain;
+                        image-fit: fill;
                     }
                     ta := TouchArea {
                         mouse-cursor: root.dragging ? MouseCursor.grabbing : root.can-drag ? MouseCursor.grab : MouseCursor.pointer;
@@ -125,23 +135,17 @@ export component Thumb inherits Window {
                             if root.del-key != "": Text { text: root.del-key + " deletes it (no mouse needed)"; color: #ffffffc0; font-size: 11.5px; horizontal-alignment: center; }
                         }
                     }
-                    // what just happened ("Uploading for a link...", "Link copied - expires in 1 year", "Copied + saved ·
-                    // name.png"), the picture's whole width, wrapping (24 Nov 2026: next to the buttons it was cut
-                    // off after ~15 letters)
-                    if root.note != "": Rectangle {
-                        y: parent.height - self.height;
-                        height: nt.preferred-height + 10px;
-                        background: #000000d0;
-                        nt := Text {
-                            x: 8px;
-                            y: 5px;
-                            width: parent.width - 16px;
-                            text: root.note;
-                            color: white;
-                            font-size: 11.5px;
-                            wrap: word-wrap;
-                        }
                     }
+                }
+                // what just happened ("Uploading for a link...", "Link copied - expires in 1 year", "Copied + saved ·
+                // name.png"): the popup's whole width, wrapping (24 Nov 2026: next to the buttons it was cut off after
+                // ~15 letters); under the picture, not on it (26 Nov 2026)
+                if root.note != "": Text {
+                    text: root.note;
+                    color: B.text;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
                 }
                 HorizontalLayout {
                     height: 30px;

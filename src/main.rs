@@ -15,6 +15,7 @@ mod dialogs;
 mod echo_link;
 mod editor;
 mod export;
+mod clouds;
 mod gamepics;
 mod ipc;
 mod keys;
@@ -578,6 +579,7 @@ fn daemon(first: Option<String>) {
     let app = App::new(cfg);
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
     app.borrow_mut().prepare();
+    share::backup::start();
     let served = ipc::serve(|cmd| {
         let _ = slint::invoke_from_event_loop(move || handle(&cmd));
     });

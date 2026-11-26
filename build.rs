@@ -4,6 +4,30 @@ fn main() {
     let cfg = slint_build::CompilerConfiguration::new().with_style("fluent".into());
     slint_build::compile_with_config("ui/main.slint", cfg).expect("slint build");
     windows_resources();
+    gdrive_secret();
+}
+
+/// Google Drive in the backup (src/clouds.rs) signs in with ECHO's Google login (the user, 26 Nov 2026: "Reuse Echo's");
+/// its client id is public, its secret is kept out of the code like Echo does (GitHub's push protection blocks Google
+/// client secrets in a public repo): env LASSO_GDRIVE_SECRET (the public build: repo secret), else gdrive.secret.txt
+/// here, else Echo's own src-tauri/gdrive.secret.txt next door (the developer PC). "*.secret.txt" never goes public.
+/// None = empty, and Lasso uses rclone's own Google login.
+fn gdrive_secret() {
+    println!("cargo:rerun-if-env-changed=LASSO_GDRIVE_SECRET");
+    println!("cargo:rerun-if-changed=gdrive.secret.txt");
+    println!("cargo:rerun-if-changed=../Echo/src-tauri/gdrive.secret.txt");
+    let secret = std::env::var("LASSO_GDRIVE_SECRET")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::fs::read_to_string("gdrive.secret.txt").ok())
+        .or_else(|| std::fs::read_to_string("../Echo/src-tauri/gdrive.secret.txt").ok())
+        .unwrap_or_default();
+    let secret = secret.trim();
+    // only a release build says so (a local check without it is fine)
+    if secret.is_empty() && std::env::var_os("GITHUB_ACTIONS").is_some() {
+        println!("cargo:warning=no Google Drive login secret (LASSO_GDRIVE_SECRET) - this build uses rclone's own Google login");
+    }
+    println!("cargo:rustc-env=LASSO_GDRIVE_SECRET={secret}");
 }
 
 /// Windows: Lasso's icon, version info (Explorer, Properties > Details - an exe without them looks more suspicious to

@@ -15,6 +15,7 @@
 //! block, so call them from a worker thread.
 
 mod api;
+pub mod backup;
 #[cfg(target_os = "linux")]
 mod keyring_linux;
 mod net;

@@ -1,3 +1,5 @@
 target/
 dist/
 *.swp
+# Google Drive login secret (build.rs) - never in git
+*.secret.txt

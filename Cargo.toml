@@ -39,6 +39,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Auto-update (src/update.rs): minisign check of a download with Lasso's own updater key (same crate as Aimdot; base64 = the one reqwest already uses)
 minisign-verify = "0.2"
 base64 = "0.23"
+# Backup to your own clouds (src/clouds.rs, 26 Nov 2026): rclone's release zip is checked (SHA-256, ring - already
+# in the build through rustls) and unpacked (zip, the same crate + features as Echo)
+ring = "0.17"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
